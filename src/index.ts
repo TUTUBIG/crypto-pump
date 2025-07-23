@@ -1,18 +1,156 @@
 import { DurableObject } from 'cloudflare:workers';
 
 /**
- * SSE Gateway using Cloudflare Durable Objects
+ * SSE Gateway using Cloudflare Durable Objects + Pool Information Management
  *
  * This worker acts as a real-time gateway where:
  * - Clients can subscribe to trade data via SSE at /subscribe
  * - External services (Go service) can push data via /publish
  * - All connected clients receive broadcasted trade data
+ * - Store and retrieve pool information using D1 database
  */
+
+interface PoolInfo {
+	ChainId: string;
+	Protocol: string;
+	PoolAddress: string;
+	PoolName: string;
+	CostTokenAddress: string;
+	CostTokenSymbol: string;
+	CostTokenDecimals: number;
+	GetTokenAddress: string;
+	GetTokenSymbol: string;
+	GetTokenDecimals: number;
+}
+
+interface PoolInfoWithId extends PoolInfo {
+	id: number;
+	created_at: string;
+	updated_at: string;
+}
+
+interface ListPoolsResponse {
+	pools: PoolInfoWithId[];
+	pagination: {
+		page: number;
+		pageSize: number;
+		total: number;
+		totalPages: number;
+		hasNext: boolean;
+		hasPrev: boolean;
+	};
+}
 
 interface SSEConnection {
 	id: string;
 	controller: ReadableStreamDefaultController;
 	abortController: AbortController;
+}
+
+// Database helper functions
+async function addPool(db: D1Database, poolData: PoolInfo): Promise<{ success: boolean; id: number }> {
+	const result = await db.prepare(`
+		INSERT INTO pool_info (
+			chain_id, protocol, pool_address, pool_name,
+			cost_token_address, cost_token_symbol, cost_token_decimals,
+			get_token_address, get_token_symbol, get_token_decimals
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`).bind(
+		poolData.ChainId,
+		poolData.Protocol,
+		poolData.PoolAddress,
+		poolData.PoolName,
+		poolData.CostTokenAddress,
+		poolData.CostTokenSymbol,
+		poolData.CostTokenDecimals,
+		poolData.GetTokenAddress,
+		poolData.GetTokenSymbol,
+		poolData.GetTokenDecimals
+	).run();
+
+	if (!result.success) {
+		throw new Error('Failed to insert pool data');
+	}
+
+	return {
+		success: true,
+		id: Number(result.meta.last_row_id) || 0
+	};
+}
+
+async function listPools(
+	db: D1Database,
+	page: number = 1,
+	pageSize: number = 20,
+	chainId?: string | null,
+	protocol?: string | null
+): Promise<ListPoolsResponse> {
+	const offset = (page - 1) * pageSize;
+
+	// Build WHERE clause dynamically
+	let whereClause = '';
+	const bindings: any[] = [];
+
+	if (chainId) {
+		whereClause += ' WHERE chain_id = ?';
+		bindings.push(chainId);
+	}
+
+	if (protocol) {
+		whereClause += chainId ? ' AND protocol = ?' : ' WHERE protocol = ?';
+		bindings.push(protocol);
+	}
+
+	// Get total count
+	const countQuery = `SELECT COUNT(*) as count FROM pool_info${whereClause}`;
+	const countResult = await db.prepare(countQuery).bind(...bindings).first();
+	const total = Number(countResult?.count) || 0;
+
+	// Get paginated results
+	const dataQuery = `
+		SELECT
+			id, chain_id, protocol, pool_address, pool_name,
+			cost_token_address, cost_token_symbol, cost_token_decimals,
+			get_token_address, get_token_symbol, get_token_decimals,
+			created_at, updated_at
+		FROM pool_info${whereClause}
+		ORDER BY created_at DESC
+		LIMIT ? OFFSET ?
+	`;
+
+	const dataResult = await db.prepare(dataQuery)
+		.bind(...bindings, pageSize, offset)
+		.all();
+
+	const pools: PoolInfoWithId[] = dataResult.results.map((row: any) => ({
+		id: row.id,
+		ChainId: row.chain_id,
+		Protocol: row.protocol,
+		PoolAddress: row.pool_address,
+		PoolName: row.pool_name,
+		CostTokenAddress: row.cost_token_address,
+		CostTokenSymbol: row.cost_token_symbol,
+		CostTokenDecimals: row.cost_token_decimals,
+		GetTokenAddress: row.get_token_address,
+		GetTokenSymbol: row.get_token_symbol,
+		GetTokenDecimals: row.get_token_decimals,
+		created_at: row.created_at,
+		updated_at: row.updated_at
+	}));
+
+	const totalPages = Math.ceil(total / pageSize);
+
+	return {
+		pools,
+		pagination: {
+			page,
+			pageSize,
+			total,
+			totalPages,
+			hasNext: page < totalPages,
+			hasPrev: page > 1
+		}
+	};
 }
 
 export class TradeDataGateway extends DurableObject<Env> {
@@ -280,6 +418,74 @@ export default {
 						headers: { 'Content-Type': 'application/json' }
 					});
 
+				case '/pools':
+					// List pools with pagination
+					if (request.method !== 'GET') {
+						return new Response('Method not allowed', { status: 405 });
+					}
+
+					try {
+						const searchParams = url.searchParams;
+						const page = parseInt(searchParams.get('page') || '1');
+						const pageSize = Math.min(parseInt(searchParams.get('pageSize') || '20'), 100); // Max 100 per page
+						const chainId = searchParams.get('chainId');
+						const protocol = searchParams.get('protocol');
+
+						const result = await listPools(env.DB, page, pageSize, chainId, protocol);
+						return new Response(JSON.stringify(result), {
+							headers: { 'Content-Type': 'application/json' }
+						});
+					} catch (error) {
+						console.error('Error listing pools:', error);
+						return new Response(JSON.stringify({ error: 'Failed to list pools' }), {
+							status: 500,
+							headers: { 'Content-Type': 'application/json' }
+						});
+					}
+
+				case '/pools/add':
+					// Add new pool
+					if (request.method !== 'POST') {
+						return new Response('Method not allowed', { status: 405 });
+					}
+
+					try {
+						const poolData: PoolInfo = await request.json();
+
+						// Validate required fields
+						if (!poolData.ChainId || !poolData.PoolAddress || !poolData.Protocol) {
+							return new Response(JSON.stringify({
+								error: 'Missing required fields: ChainId, PoolAddress, Protocol'
+							}), {
+								status: 400,
+								headers: { 'Content-Type': 'application/json' }
+							});
+						}
+
+						const result = await addPool(env.DB, poolData);
+						return new Response(JSON.stringify(result), {
+							status: 201,
+							headers: { 'Content-Type': 'application/json' }
+						});
+					} catch (error) {
+						console.error('Error adding pool:', error);
+
+						// Handle duplicate pool address error
+						if (error instanceof Error && error.message.includes('UNIQUE constraint failed')) {
+							return new Response(JSON.stringify({
+								error: 'Pool already exists with this address and chain ID'
+							}), {
+								status: 409,
+								headers: { 'Content-Type': 'application/json' }
+							});
+						}
+
+						return new Response(JSON.stringify({ error: 'Failed to add pool' }), {
+							status: 500,
+							headers: { 'Content-Type': 'application/json' }
+						});
+					}
+
 				case '/':
 					console.log(`[FETCH] Handling root / request`);
 					// Health check / info endpoint
@@ -289,6 +495,8 @@ export default {
 							'/subscribe': 'GET - Subscribe to trade data via SSE',
 							'/publish': 'POST - Publish base64 data (responds immediately, broadcasts async)',
 							'/stats': 'GET - Get connection statistics',
+							'/pools': 'GET - List pools with pagination (?page=1&pageSize=20&chainId=1&protocol=uniswap)',
+							'/pools/add': 'POST - Add new pool information',
 							'/': 'GET - This info page'
 						},
 						features: [

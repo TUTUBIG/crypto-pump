@@ -23,6 +23,13 @@
 			}
 		]
 	},
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "crypto-pump-db",
+			"database_id": "80f94fa5-fcac-4f7b-a4e7-c87199e22b3e"
+		}
+	],
 	"observability": {
 		"enabled": true
 	}
