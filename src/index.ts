@@ -292,6 +292,7 @@ export class TradeDataGateway extends DurableObject<Env> {
 
 	/**
 	 * Remove a connection and clean up resources
+	 * TODO: Still can not detect the closed connection
 	 */
 	private removeConnection(connectionId: string, reason: string = 'unknown') {
 		const connection = this.connections.get(connectionId);
