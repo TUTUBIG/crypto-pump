@@ -45,6 +45,8 @@ interface SSEConnection {
 	id: string;
 	controller: ReadableStreamDefaultController;
 	abortController: AbortController;
+	writer: WritableStreamDefaultWriter; // For proper cleanup
+	consecutiveTimeouts: number; // Count consecutive 100ms timeouts
 }
 
 // Database helper functions
@@ -155,17 +157,50 @@ async function listPools(
 
 export class TradeDataGateway extends DurableObject<Env> {
 	private connections: Map<string, SSEConnection> = new Map();
-	private heartbeatInterval: number | null = null;
 
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env);
+
+		// Add global error handler to catch "Network connection lost" errors
+		this.setupGlobalErrorHandler();
 	}
 
-		/**
+	/**
+	 * Setup global error handler to catch unhandled network errors
+	 */
+	private setupGlobalErrorHandler() {
+		// Listen for unhandled promise rejections
+		self.addEventListener('unhandledrejection', (event) => {
+			console.log(`🚨 GLOBAL ERROR CAUGHT:`, event.reason);
+
+			// Check if this is a network connection error
+			if (event.reason && typeof event.reason === 'object') {
+				const error = event.reason as Error;
+				if (error.message.includes('Network connection lost') ||
+					error.message.includes('NetworkError') ||
+					error.message.includes('connection')) {
+
+					console.log(`🚨 NETWORK CONNECTION ERROR DETECTED GLOBALLY`);
+
+					// Mark all connections as potentially unhealthy
+					for (const [connectionId, connection] of this.connections) {
+						console.log(`💀 Marking connection ${connectionId} as potentially unhealthy due to global network error`);
+						connection.consecutiveTimeouts = 5;
+					}
+				}
+			}
+
+			// Prevent the error from being unhandled
+			event.preventDefault();
+		});
+	}
+
+	/**
 	 * Add a new SSE connection
 	 */
 	async addConnection(request: Request): Promise<Response> {
 		const connectionId = crypto.randomUUID();
+		console.log(`🔗 NEW CONNECTION: ${connectionId}`);
 
 		// Create readable stream for SSE
 		const { readable, writable } = new TransformStream();
@@ -174,36 +209,49 @@ export class TradeDataGateway extends DurableObject<Env> {
 		// Create abort controller for cleanup
 		const abortController = new AbortController();
 
-		// Create custom controller interface
+		// Controller that captures "Network connection lost" errors
 		const customController = {
 			enqueue: (chunk: Uint8Array) => {
 				try {
-					// Use the promise-based approach without await in enqueue
-					writer.write(chunk).catch(error => {
-						console.log(`Failed to write to connection ${connectionId}:`, error);
-						this.removeConnection(connectionId);
+					writer.write(chunk).catch((error) => {
+						console.log(`🚨 NETWORK CONNECTION LOST for ${connectionId}:`, error);
+						// Immediately mark connection as unhealthy
+						const connection = this.connections.get(connectionId);
+						if (connection) {
+							connection.consecutiveTimeouts = 5; // Force unhealthy
+							console.log(`💀 Connection ${connectionId} marked UNHEALTHY due to network error`);
+						}
 					});
 				} catch (error) {
-					console.log(`Failed to write to connection ${connectionId}:`, error);
-					this.removeConnection(connectionId);
+					console.log(`🚨 SYNC NETWORK ERROR for ${connectionId}:`, error);
+					// Immediately mark connection as unhealthy
+					const connection = this.connections.get(connectionId);
+					if (connection) {
+						connection.consecutiveTimeouts = 5; // Force unhealthy
+						console.log(`💀 Connection ${connectionId} marked UNHEALTHY due to sync network error`);
+					}
 				}
 			}
 		};
 
-		// Store connection
+		// Store connection with writer for cleanup
 		this.connections.set(connectionId, {
 			id: connectionId,
 			controller: customController as any,
-			abortController
+			abortController,
+			writer,
+			consecutiveTimeouts: 0
 		});
 
 		// Handle client disconnect
 		request.signal?.addEventListener('abort', () => {
-			console.log(`[NETWORK-LEVEL] TCP connection closed for ${connectionId}`);
-			console.log(`[TECHNICAL] This is NOT sent over SSE - it's TCP FIN/RST detection`);
+			console.log(`🔌 CLIENT DISCONNECTED: Connection ${connectionId} closed by client`);
+			console.log(`📊 Connection details: TCP connection terminated (FIN/RST packet received)`);
+			console.log(`📈 Active connections before cleanup: ${this.connections.size}`);
 			writer.close().catch(() => {}); // Close the writer
-			this.removeConnection(connectionId);
+			this.removeConnection(connectionId, 'client_disconnect');
 		});
+
 
 		// Additional cleanup for server-side abort
 		abortController.signal.addEventListener('abort', () => {
@@ -211,20 +259,24 @@ export class TradeDataGateway extends DurableObject<Env> {
 			writer.close().catch(() => {}); // Close the writer
 		});
 
-		// Send initial data to force stream to start immediately
 
-		// Send a small amount of padding to force immediate stream start
+		// Send padding to force immediate stream start (prevents browser buffering)
 		const padding = ': SSE connection established\n\n';
 		customController.enqueue(new TextEncoder().encode(padding));
 
 		// Send welcome message
-		const welcomeMessage = `event: connected\ndata: ${JSON.stringify({ connectionId, message: 'Connected to trade data stream from Wallet Kit' })}\n\n`;
-
+		const welcomeMessage = `data: ${JSON.stringify({ connectionId, message: 'Connected to trade data stream from Wallet Kit' })}\n\n`;
 		customController.enqueue(new TextEncoder().encode(welcomeMessage));
+
+		// Send another small chunk to ensure stream is fully active
+		const activationChunk = ': Stream active\n\n';
+		customController.enqueue(new TextEncoder().encode(activationChunk));
+
+		console.log(`✅ SSE connection established: ${connectionId} (total: ${this.connections.size})`);
 
 
 		// Return SSE response with proper headers for immediate streaming
-			return new Response(readable, {
+		return new Response(readable, {
 			headers: {
 				'Content-Type': 'text/event-stream; charset=utf-8',
 				'Cache-Control': 'no-cache, no-store, must-revalidate',
@@ -233,51 +285,93 @@ export class TradeDataGateway extends DurableObject<Env> {
 				'Access-Control-Allow-Headers': 'Cache-Control',
 				'X-Accel-Buffering': 'no', // Disable nginx buffering
 				'Transfer-Encoding': 'chunked', // Force chunked encoding
+				'Content-Encoding': 'identity', // Prevent compression buffering
 			},
 		});
 	}
 
 	/**
-	 * Remove a connection
+	 * Remove a connection and clean up resources
 	 */
-	private removeConnection(connectionId: string) {
+	private removeConnection(connectionId: string, reason: string = 'unknown') {
 		const connection = this.connections.get(connectionId);
 		if (connection) {
+			// Abort the connection
 			connection.abortController.abort();
+
+			// Close the writer to free up resources
+			try {
+				connection.writer.close().catch(() => {
+					// Ignore close errors - writer might already be closed
+				});
+			} catch (error) {
+				// Ignore sync close errors
+			}
+
+			// Remove from connections map
 			this.connections.delete(connectionId);
-			console.log(`Removed connection: ${connectionId}. Remaining connections: ${this.connections.size}`);
+
+			console.log(`❌ REMOVED CONNECTION: ${connectionId} (reason: ${reason})`);
 		}
 	}
 
-	/**
-	 * Send data to a single connection with timeout and error handling
+		/**
+	 * Send data with aggressive dead connection detection
 	 */
-	private async sendToConnection(connectionId: string, connection: SSEConnection, data: Uint8Array): Promise<void> {
-		return new Promise((resolve, reject) => {
-			// Set timeout for slow connections
+	private async sendToConnection(connectionId: string, connection: SSEConnection, data: Uint8Array): Promise<boolean> {
+		return new Promise((resolve) => {
+			// Check if connection was already marked unhealthy
+			if (connection.consecutiveTimeouts >= 5) {
+				console.log(`💀 Connection ${connectionId} already marked UNHEALTHY - removing immediately`);
+				this.removeConnection(connectionId, 'network_error_detected');
+				resolve(false);
+				return;
+			}
+
+			// Very short timeout to catch dead connections quickly
 			const timeout = setTimeout(() => {
-				reject(new Error(`Timeout sending to connection ${connectionId}`));
-			}, 1000); // 1 second timeout
+				connection.consecutiveTimeouts++;
+				console.log(`⏰ Timeout #${connection.consecutiveTimeouts} for connection ${connectionId}`);
+
+				if (connection.consecutiveTimeouts >= 5) {
+					console.log(`💀 Connection ${connectionId} marked UNHEALTHY after 5 consecutive timeouts`);
+					this.removeConnection(connectionId, 'timeout_unhealthy');
+				}
+				resolve(false);
+			}, 50); // Reduced to 50ms for faster detection
 
 			try {
-				// Don't await here to avoid blocking
+				// Use enqueue instead of direct writer operations
 				connection.controller.enqueue(data);
-				clearTimeout(timeout);
-				resolve();
+
+				// Small delay to allow the writer to complete
+				setTimeout(() => {
+					clearTimeout(timeout);
+					connection.consecutiveTimeouts = 0; // Reset on success
+					resolve(true);
+				}, 10);
 			} catch (error) {
 				clearTimeout(timeout);
-				reject(error);
+				console.log(`❌ Sync write error for connection ${connectionId}:`, error);
+				connection.consecutiveTimeouts = 5; // Mark as unhealthy
+				this.removeConnection(connectionId, 'write_error');
+				resolve(false);
 			}
 		});
 	}
 
 	/**
-	 * Get connection statistics
+	 * Get connection statistics - simplified
 	 */
-	getStats(): { connectionCount: number; connections: string[] } {
+	getStats(): { connectionCount: number; connections: any[] } {
 		return {
 			connectionCount: this.connections.size,
-			connections: Array.from(this.connections.keys())
+			connections: Array.from(this.connections.values()).map(conn => ({
+				id: conn.id,
+				consecutiveTimeouts: conn.consecutiveTimeouts,
+				isHealthy: conn.consecutiveTimeouts < 5,
+				serverAborted: conn.abortController.signal.aborted
+			}))
 		};
 	}
 
@@ -293,12 +387,15 @@ export class TradeDataGateway extends DurableObject<Env> {
 
 			console.log(`[ASYNC BROADCAST] Starting broadcast to ${this.connections.size} connections`);
 
-			// Convert base64 string to Uint8Array before broadcasting
-			const binaryData = Uint8Array.from(atob(base64Data), c => c.charCodeAt(0));
+			// Format data as simple SSE message (no event field needed)
+			const sseEvent = `data: ${base64Data}\n\n`;
+			const sseData = new TextEncoder().encode(sseEvent);
+
+			console.log(`[ASYNC BROADCAST] Sending SSE data: ${sseEvent.substring(0, 100)}...`);
 
 			// Create parallel tasks for each connection
 			const broadcastTasks = Array.from(this.connections.entries()).map(([connectionId, connection]) => {
-				return this.sendToConnection(connectionId, connection, binaryData);
+				return this.sendToConnection(connectionId, connection, sseData);
 			});
 
 			// Execute all broadcasts in parallel with timeout
@@ -307,17 +404,20 @@ export class TradeDataGateway extends DurableObject<Env> {
 			// Process results and clean up failed connections
 			const deadConnections: string[] = [];
 			results.forEach((result, index) => {
+				const connectionId = Array.from(this.connections.keys())[index];
 				if (result.status === 'rejected') {
-					const connectionId = Array.from(this.connections.keys())[index];
 					deadConnections.push(connectionId);
 					console.log(`[ASYNC BROADCAST] Connection ${connectionId} failed:`, result.reason);
+				} else if (result.status === 'fulfilled' && !result.value) {
+					deadConnections.push(connectionId);
+					console.log(`[ASYNC BROADCAST] Connection ${connectionId} failed to send data`);
 				}
 			});
 
 			// Remove dead connections
-			deadConnections.forEach(id => this.removeConnection(id));
+			deadConnections.forEach(id => this.removeConnection(id, 'broadcast_failed'));
 
-			const successCount = results.filter(r => r.status === 'fulfilled').length;
+			const successCount = results.filter(r => r.status === 'fulfilled' && r.value).length;
 			console.log(`[ASYNC BROADCAST] Completed: ${successCount}/${this.connections.size} connections notified`);
 
 			return {
@@ -347,7 +447,7 @@ export class TradeDataGateway extends DurableObject<Env> {
 	/**
 	 * RPC method to get gateway statistics
 	 */
-	async getGatewayStats(): Promise<{ connectionCount: number; connections: string[] }> {
+	async getGatewayStats(): Promise<{ connectionCount: number; connections: any[] }> {
 		return this.getStats();
 	}
 }
@@ -378,7 +478,6 @@ export default {
 					if (request.method !== 'GET') {
 						return new Response('Method not allowed', { status: 405 });
 					}
-					console.log(`[FETCH] Calling gateway.handleSSEConnection`);
 					return await gateway.handleSSEConnection(request);
 
 				case '/publish':
@@ -391,6 +490,9 @@ export default {
 					if (contentType.includes('application/base64')) {
 						// Handle raw binary data
 						const binaryData = await request.arrayBuffer();
+						if (binaryData.byteLength == 0) {
+							return new Response('Empty data', { status: 400 });
+						}
 						const base64Data = btoa(String.fromCharCode(...new Uint8Array(binaryData)));
 
 						// Start async broadcast - don't await it
@@ -475,7 +577,7 @@ export default {
 							return new Response(JSON.stringify({
 								error: 'Pool already exists with this address and chain ID'
 							}), {
-								status: 409,
+								status: 201,
 								headers: { 'Content-Type': 'application/json' }
 							});
 						}
@@ -500,10 +602,10 @@ export default {
 							'/': 'GET - This info page'
 						},
 						features: [
-							'Asynchronous broadcasting (immediate response)',
-							'Parallel connection handling',
-							'Automatic dead connection cleanup',
-							'Base64 binary data support'
+							'100ms timeout + immediate network error capture',
+							'Unhealthy after 5 consecutive timeouts OR any network error',
+							'Immediate removal of unhealthy connections',
+							'No background heartbeat overhead'
 						],
 						timestamp: new Date().toISOString()
 					}), {
