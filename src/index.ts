@@ -159,7 +159,7 @@ export class WebSocketGateway extends DurableObject<Env> {
 
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env);
-		
+
 		// Enable WebSocket hibernation for cost savings
 		this.setupHibernation();
 	}
@@ -172,6 +172,8 @@ export class WebSocketGateway extends DurableObject<Env> {
 		// Cloudflare Workers will hibernate WebSockets when idle
 		console.log('💤 WebSocket hibernation enabled for cost savings');
 	}
+
+
 
 	/**
 	 * Handle WebSocket connection
@@ -195,14 +197,14 @@ export class WebSocketGateway extends DurableObject<Env> {
 		// Set up WebSocket event handlers
 		server.accept();
 
-		// Send welcome message
-		const welcomeMessage = JSON.stringify({
-			type: 'connected',
-			connectionId,
-			message: 'Connected to WebSocket trade data stream',
-			timestamp: now
-		});
-		server.send(welcomeMessage);
+		// Send welcome message (optional - can be removed if causing browser warnings)
+		// const welcomeMessage = JSON.stringify({
+		// 	type: 'connected',
+		// 	connectionId,
+		// 	message: 'Connected to WebSocket trade data stream',
+		// 	timestamp: now
+		// });
+		// server.send(welcomeMessage);
 
 		// Handle WebSocket events
 		server.addEventListener('message', (event) => {
@@ -213,7 +215,7 @@ export class WebSocketGateway extends DurableObject<Env> {
 				// Handle different message types
 				if (data.type === 'ping') {
 					const pongMessage = JSON.stringify({
-						type: 'pong',
+						response: 'pong',
 						timestamp: Date.now()
 					});
 					server.send(pongMessage);
@@ -317,9 +319,8 @@ export class WebSocketGateway extends DurableObject<Env> {
 
 			console.log(`Broadcasting to ${this.connections.size} WebSocket connections`);
 
-			// Format data as JSON message
+			// Format data as JSON message (without custom type to avoid browser warnings)
 			const message = JSON.stringify({
-				type: 'tradeData',
 				data: data,
 				timestamp: Date.now()
 			});
@@ -483,14 +484,31 @@ export default {
 		console.log(`[FETCH] Created Durable Object instance with ID: ${id}`);
 
 		try {
+			// Handle CORS preflight requests
+			if (request.method === 'OPTIONS') {
+				return new Response(null, {
+					status: 200,
+					headers: {
+						'Access-Control-Allow-Origin': '*',
+						'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+						'Access-Control-Allow-Headers': 'Content-Type',
+						'Access-Control-Max-Age': '86400'
+					}
+				});
+			}
+
 			switch (path) {
 				case '/ws':
-					console.log(`[FETCH] Handling /ws WebSocket upgrade request`);
+					console.log(`[FETCH] Handling WebSocket upgrade request`);
 					// Handle WebSocket connections
 					if (request.method !== 'GET') {
 						return new Response('Method not allowed', { status: 405 });
 					}
 					console.log(`[FETCH] Calling gateway.fetch for WebSocket`);
+					// Add CORS headers for WebSocket upgrade
+					// wsResponse.headers.set('Access-Control-Allow-Origin', '*');
+					// wsResponse.headers.set('Access-Control-Allow-Methods', 'GET, OPTIONS');
+					// wsResponse.headers.set('Access-Control-Allow-Headers', 'Content-Type');
 					return await gateway.fetch(request);
 
 				case '/publish':
@@ -632,6 +650,24 @@ export default {
 						});
 					}
 
+				case '/candle-chart':
+					console.log(`[FETCH] Handling /candle-chart request`);
+					const candleChartResponse = await handleCandleChart(request, env);
+					// Add CORS headers
+					candleChartResponse.headers.set('Access-Control-Allow-Origin', '*');
+					candleChartResponse.headers.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+					candleChartResponse.headers.set('Access-Control-Allow-Headers', 'Content-Type');
+					return candleChartResponse;
+
+				case '/single-candle':
+					console.log(`[FETCH] Handling /single-candle request`);
+					const singleCandleResponse = await handleSingleCandle(request, env);
+					// Add CORS headers
+					singleCandleResponse.headers.set('Access-Control-Allow-Origin', '*');
+					singleCandleResponse.headers.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+					singleCandleResponse.headers.set('Access-Control-Allow-Headers', 'Content-Type');
+					return singleCandleResponse;
+
 				case '/':
 					console.log(`[FETCH] Handling root / request`);
 					// Health check / info endpoint
@@ -645,6 +681,8 @@ export default {
 							'/debug': 'GET - Get detailed WebSocket connection debug info',
 							'/pools': 'GET - List pools with pagination (?page=1&pageSize=20&chainId=1&protocol=uniswap)',
 							'/pools/add': 'POST - Add new pool information',
+							'/candle-chart': 'POST - Store candle chart data in KV',
+							'/single-candle': 'GET - Retrieve candle data from KV',
 							'/': 'GET - This info page'
 						},
 						features: [
@@ -652,7 +690,8 @@ export default {
 							'Support for both JSON and binary data',
 							'Immediate connection state detection',
 							'Bidirectional messaging support',
-							'Automatic dead connection cleanup'
+							'Automatic dead connection cleanup',
+							'KV storage for candle chart data'
 						],
 						timestamp: new Date().toISOString()
 					}), {
@@ -667,4 +706,82 @@ export default {
 			return new Response('Internal Server Error', { status: 500 });
 		}
 	},
+
 } satisfies ExportedHandler<Env>;
+
+/**
+ * Handle candle chart data using KV storage
+ */
+async function handleCandleChart(request: Request, env: Env): Promise<Response> {
+	try {
+		const url = new URL(request.url);
+		const tradePairId = url.searchParams.get('trade_pair_id') || '1';
+		const timeframe = url.searchParams.get('timeframe') || '60';
+		const page_index = url.searchParams.get('page') || '1';
+
+		// Calculate the date for the requested page
+		const page = parseInt(page_index, 10) || 1;
+		const now = new Date();
+		// Clone the date to avoid mutating 'now'
+		const targetDate = new Date(now);
+		targetDate.setUTCDate(now.getUTCDate() - (page - 1));
+		targetDate.setUTCHours(0, 0, 0, 0);
+
+		// Format date as YYYY-MM-DD
+		const yyyy = targetDate.getUTCFullYear();
+		const mm = String(targetDate.getUTCMonth() + 1).padStart(2, '0');
+		const dd = String(targetDate.getUTCDate()).padStart(2, '0');
+		const dateStr = `${yyyy}-${mm}-${dd}`;
+
+		// Compose the key for this day's candle data
+		//const key = `${tradePairId}-${timeframe}-${dateStr}`;
+
+		const key = "1-uniSwapV3-5afD198e7b0Ed5E2eDB1967879f85F4d7fe41972-60-2025-07-24"
+
+		// Retrieve candle data for this day from KV
+		const candleData = await env.KV.get(key, 'arrayBuffer');
+
+		return new Response(candleData, {
+			headers: { 'Content-Type': 'application/binary' }
+		});
+	} catch (error) {
+		return new Response(JSON.stringify({
+			success: false,
+			error: error instanceof Error ? error.message : 'Unknown error'
+		}), {
+			status: 500,
+			headers: { 'Content-Type': 'application/json' }
+		});
+	}
+}
+
+/**
+ * Handle single candle data retrieval from KV
+ */
+async function handleSingleCandle(request: Request, env: Env): Promise<Response> {
+	try {
+		const url = new URL(request.url);
+		const tradePairId = url.searchParams.get('trade_pair_id') || '1';
+		const timeframe = url.searchParams.get('timeframe') || '60';
+
+		// Compose the key for this day's candle data
+		// const key = `${tradePairId}-${timeframe}-current`;
+		const key = "1-uniSwapV3-5afD198e7b0Ed5E2eDB1967879f85F4d7fe41972-60-current"
+
+
+		// Retrieve candle data for this day from KV
+		const candleData = await env.KV.get(key, 'arrayBuffer');
+
+		return new Response(candleData, {
+			headers: { 'Content-Type': 'application/binary' }
+		});
+	} catch (error) {
+		return new Response(JSON.stringify({
+			success: false,
+			error: error instanceof Error ? error.message : 'Unknown error'
+		}), {
+			status: 500,
+			headers: { 'Content-Type': 'application/json' }
+		});
+	}
+}
