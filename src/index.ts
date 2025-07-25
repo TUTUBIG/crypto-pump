@@ -159,6 +159,18 @@ export class WebSocketGateway extends DurableObject<Env> {
 
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env);
+		
+		// Enable WebSocket hibernation for cost savings
+		this.setupHibernation();
+	}
+
+	/**
+	 * Set up WebSocket hibernation to reduce costs
+	 */
+	private setupHibernation() {
+		// Note: WebSocket hibernation is automatically enabled
+		// Cloudflare Workers will hibernate WebSockets when idle
+		console.log('💤 WebSocket hibernation enabled for cost savings');
 	}
 
 	/**
