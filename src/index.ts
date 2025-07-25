@@ -1,10 +1,10 @@
 import { DurableObject } from 'cloudflare:workers';
 
 /**
- * SSE Gateway using Cloudflare Durable Objects + Pool Information Management
+ * WebSocket Gateway using Cloudflare Durable Objects + Pool Information Management
  *
  * This worker acts as a real-time gateway where:
- * - Clients can subscribe to trade data via SSE at /subscribe
+ * - Clients can connect via WebSocket at /ws
  * - External services (Go service) can push data via /publish
  * - All connected clients receive broadcasted trade data
  * - Store and retrieve pool information using D1 database
@@ -41,12 +41,11 @@ interface ListPoolsResponse {
 	};
 }
 
-interface SSEConnection {
+interface WebSocketConnection {
 	id: string;
-	controller: ReadableStreamDefaultController;
-	abortController: AbortController;
-	writer: WritableStreamDefaultWriter; // For proper cleanup
-	consecutiveTimeouts: number; // Count consecutive 100ms timeouts
+	webSocket: WebSocket;
+	createdAt: number;
+	lastHeartbeat: number;
 }
 
 // Database helper functions
@@ -155,278 +154,188 @@ async function listPools(
 	};
 }
 
-export class TradeDataGateway extends DurableObject<Env> {
-	private connections: Map<string, SSEConnection> = new Map();
+export class WebSocketGateway extends DurableObject<Env> {
+	private connections: Map<string, WebSocketConnection> = new Map();
 
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env);
-
-		// Add global error handler to catch "Network connection lost" errors
-		this.setupGlobalErrorHandler();
 	}
 
 	/**
-	 * Setup global error handler to catch unhandled network errors
+	 * Handle WebSocket connection
 	 */
-	private setupGlobalErrorHandler() {
-		// Listen for unhandled promise rejections
-		self.addEventListener('unhandledrejection', (event) => {
-			console.log(`🚨 GLOBAL ERROR CAUGHT:`, event.reason);
-
-			// Check if this is a network connection error
-			if (event.reason && typeof event.reason === 'object') {
-				const error = event.reason as Error;
-				if (error.message.includes('Network connection lost') ||
-					error.message.includes('NetworkError') ||
-					error.message.includes('connection')) {
-
-					console.log(`🚨 NETWORK CONNECTION ERROR DETECTED GLOBALLY`);
-
-					// Mark all connections as potentially unhealthy
-					for (const [connectionId, connection] of this.connections) {
-						console.log(`💀 Marking connection ${connectionId} as potentially unhealthy due to global network error`);
-						connection.consecutiveTimeouts = 5;
-					}
-				}
-			}
-
-			// Prevent the error from being unhandled
-			event.preventDefault();
-		});
-	}
-
-	/**
-	 * Add a new SSE connection
-	 */
-	async addConnection(request: Request): Promise<Response> {
+	async handleWebSocketConnection(request: Request): Promise<Response> {
 		const connectionId = crypto.randomUUID();
-		console.log(`🔗 NEW CONNECTION: ${connectionId}`);
+		console.log(`🔗 NEW WEBSOCKET CONNECTION: ${connectionId}`);
 
-		// Create readable stream for SSE
-		const { readable, writable } = new TransformStream();
-		const writer = writable.getWriter();
+		// Create WebSocket pair
+		const [client, server] = Object.values(new WebSocketPair());
 
-		// Create abort controller for cleanup
-		const abortController = new AbortController();
-
-		// Controller that captures "Network connection lost" errors
-		const customController = {
-			enqueue: (chunk: Uint8Array) => {
-				try {
-					writer.write(chunk).catch((error) => {
-						console.log(`🚨 NETWORK CONNECTION LOST for ${connectionId}:`, error);
-						// Immediately mark connection as unhealthy
-						const connection = this.connections.get(connectionId);
-						if (connection) {
-							connection.consecutiveTimeouts = 5; // Force unhealthy
-							console.log(`💀 Connection ${connectionId} marked UNHEALTHY due to network error`);
-						}
-					});
-				} catch (error) {
-					console.log(`🚨 SYNC NETWORK ERROR for ${connectionId}:`, error);
-					// Immediately mark connection as unhealthy
-					const connection = this.connections.get(connectionId);
-					if (connection) {
-						connection.consecutiveTimeouts = 5; // Force unhealthy
-						console.log(`💀 Connection ${connectionId} marked UNHEALTHY due to sync network error`);
-					}
-				}
-			}
-		};
-
-		// Store connection with writer for cleanup
+		// Store connection
+		const now = Date.now();
 		this.connections.set(connectionId, {
 			id: connectionId,
-			controller: customController as any,
-			abortController,
-			writer,
-			consecutiveTimeouts: 0
+			webSocket: server,
+			createdAt: now,
+			lastHeartbeat: now
 		});
 
-		// Handle client disconnect
-		request.signal?.addEventListener('abort', () => {
-			console.log(`🔌 CLIENT DISCONNECTED: Connection ${connectionId} closed by client`);
-			console.log(`📊 Connection details: TCP connection terminated (FIN/RST packet received)`);
-			console.log(`📈 Active connections before cleanup: ${this.connections.size}`);
-			writer.close().catch(() => {}); // Close the writer
+		// Set up WebSocket event handlers
+		server.accept();
+
+		// Send welcome message
+		const welcomeMessage = JSON.stringify({
+			type: 'connected',
+			connectionId,
+			message: 'Connected to WebSocket trade data stream',
+			timestamp: now
+		});
+		server.send(welcomeMessage);
+
+		// Handle WebSocket events
+		server.addEventListener('message', (event) => {
+			try {
+				const data = JSON.parse(event.data as string);
+				console.log(`📨 Message from ${connectionId}:`, data);
+
+				// Handle different message types
+				if (data.type === 'ping') {
+					const pongMessage = JSON.stringify({
+						type: 'pong',
+						timestamp: Date.now()
+					});
+					server.send(pongMessage);
+				}
+			} catch (error) {
+				console.log(`❌ Error parsing message from ${connectionId}:`, error);
+			}
+		});
+
+		server.addEventListener('close', (event) => {
+			console.log(`🔌 WEBSOCKET CLOSED: ${connectionId} (code: ${event.code}, reason: ${event.reason})`);
 			this.removeConnection(connectionId, 'client_disconnect');
 		});
 
-
-		// Additional cleanup for server-side abort
-		abortController.signal.addEventListener('abort', () => {
-			console.log(`Connection aborted by server - Connection ID: ${connectionId}`);
-			writer.close().catch(() => {}); // Close the writer
+		server.addEventListener('error', (event) => {
+			console.log(`🔌 WebSocket error event for ${connectionId}:`, event);
+			this.removeConnection(connectionId, 'websocket_error');
 		});
 
+		console.log(`✅ WebSocket connection established: ${connectionId} (total: ${this.connections.size})`);
 
-		// Send padding to force immediate stream start (prevents browser buffering)
-		const padding = ': SSE connection established\n\n';
-		customController.enqueue(new TextEncoder().encode(padding));
-
-		// Send welcome message
-		const welcomeMessage = `data: ${JSON.stringify({ connectionId, message: 'Connected to trade data stream from Wallet Kit' })}\n\n`;
-		customController.enqueue(new TextEncoder().encode(welcomeMessage));
-
-		// Send another small chunk to ensure stream is fully active
-		const activationChunk = ': Stream active\n\n';
-		customController.enqueue(new TextEncoder().encode(activationChunk));
-
-		console.log(`✅ SSE connection established: ${connectionId} (total: ${this.connections.size})`);
-
-
-		// Return SSE response with proper headers for immediate streaming
-		return new Response(readable, {
-			headers: {
-				'Content-Type': 'text/event-stream; charset=utf-8',
-				'Cache-Control': 'no-cache, no-store, must-revalidate',
-				'Connection': 'keep-alive',
-				'Access-Control-Allow-Origin': '*',
-				'Access-Control-Allow-Headers': 'Cache-Control',
-				'X-Accel-Buffering': 'no', // Disable nginx buffering
-				'Transfer-Encoding': 'chunked', // Force chunked encoding
-				'Content-Encoding': 'identity', // Prevent compression buffering
-			},
+		return new Response(null, {
+			status: 101,
+			webSocket: client
 		});
 	}
 
 	/**
 	 * Remove a connection and clean up resources
-	 * TODO: Still can not detect the closed connection
 	 */
 	private removeConnection(connectionId: string, reason: string = 'unknown') {
 		const connection = this.connections.get(connectionId);
 		if (connection) {
-			// Abort the connection
-			connection.abortController.abort();
-
-			// Close the writer to free up resources
+			// Close the WebSocket
 			try {
-				connection.writer.close().catch(() => {
-					// Ignore close errors - writer might already be closed
-				});
+				connection.webSocket.close(1000, 'Connection removed');
 			} catch (error) {
-				// Ignore sync close errors
+				// WebSocket might already be closed
 			}
 
 			// Remove from connections map
 			this.connections.delete(connectionId);
 
-			console.log(`❌ REMOVED CONNECTION: ${connectionId} (reason: ${reason})`);
+			console.log(`❌ REMOVED WEBSOCKET: ${connectionId} (reason: ${reason})`);
+			console.log(`📊 Remaining connections: ${this.connections.size}`);
 		}
 	}
 
-		/**
-	 * Send data with aggressive dead connection detection
+	/**
+	 * Send data to a single WebSocket connection
 	 */
-	private async sendToConnection(connectionId: string, connection: SSEConnection, data: Uint8Array): Promise<boolean> {
+	private async sendToConnection(connectionId: string, connection: WebSocketConnection, data: string | ArrayBuffer): Promise<boolean> {
 		return new Promise((resolve) => {
-			// Check if connection was already marked unhealthy
-			if (connection.consecutiveTimeouts >= 5) {
-				console.log(`💀 Connection ${connectionId} already marked UNHEALTHY - removing immediately`);
-				this.removeConnection(connectionId, 'network_error_detected');
-				resolve(false);
-				return;
-			}
-
-			// Very short timeout to catch dead connections quickly
+			// 100ms timeout for dead connection detection
 			const timeout = setTimeout(() => {
-				connection.consecutiveTimeouts++;
-				console.log(`⏰ Timeout #${connection.consecutiveTimeouts} for connection ${connectionId}`);
-
-				if (connection.consecutiveTimeouts >= 5) {
-					console.log(`💀 Connection ${connectionId} marked UNHEALTHY after 5 consecutive timeouts`);
-					this.removeConnection(connectionId, 'timeout_unhealthy');
-				}
+				console.log(`⏰ Timeout sending to WebSocket ${connectionId}`);
 				resolve(false);
-			}, 50); // Reduced to 50ms for faster detection
+			}, 100);
 
 			try {
-				// Use enqueue instead of direct writer operations
-				connection.controller.enqueue(data);
-
-				// Small delay to allow the writer to complete
-				setTimeout(() => {
-					clearTimeout(timeout);
-					connection.consecutiveTimeouts = 0; // Reset on success
-					resolve(true);
-				}, 10);
+				connection.webSocket.send(data);
+				clearTimeout(timeout);
+				resolve(true);
 			} catch (error) {
 				clearTimeout(timeout);
-				console.log(`❌ Sync write error for connection ${connectionId}:`, error);
-				connection.consecutiveTimeouts = 5; // Mark as unhealthy
-				this.removeConnection(connectionId, 'write_error');
+				console.log(`❌ WebSocket send error for ${connectionId}:`, error);
+				this.removeConnection(connectionId, 'send_error');
 				resolve(false);
 			}
 		});
 	}
 
 	/**
-	 * Get connection statistics - simplified
+	 * Get connection statistics
 	 */
 	getStats(): { connectionCount: number; connections: any[] } {
+		const now = Date.now();
 		return {
 			connectionCount: this.connections.size,
 			connections: Array.from(this.connections.values()).map(conn => ({
 				id: conn.id,
-				consecutiveTimeouts: conn.consecutiveTimeouts,
-				isHealthy: conn.consecutiveTimeouts < 5,
-				serverAborted: conn.abortController.signal.aborted
+				createdAt: new Date(conn.createdAt).toISOString(),
+				lastHeartbeat: new Date(conn.lastHeartbeat).toISOString(),
+				ageSeconds: Math.floor((now - conn.createdAt) / 1000),
+				readyState: conn.webSocket.readyState
 			}))
 		};
 	}
 
-		/**
-	 * RPC method to handle data (runs asynchronously)
+	/**
+	 * Broadcast data to all WebSocket connections
 	 */
-	async publishBinaryData(base64Data: string): Promise<{ success: boolean; connectionsNotified: number }> {
+	async publishData(data: any): Promise<{ success: boolean; connectionsNotified: number }> {
+		console.log("Publishing data to WebSocket connections");
+
 		try {
 			if (this.connections.size === 0) {
-				console.log('No connections to broadcast binary data to');
+				console.log('No WebSocket connections to broadcast to');
 				return { success: true, connectionsNotified: 0 };
 			}
 
-			console.log(`[ASYNC BROADCAST] Starting broadcast to ${this.connections.size} connections`);
+			console.log(`Broadcasting to ${this.connections.size} WebSocket connections`);
 
-			// Format data as simple SSE message (no event field needed)
-			const sseEvent = `data: ${base64Data}\n\n`;
-			const sseData = new TextEncoder().encode(sseEvent);
-
-			console.log(`[ASYNC BROADCAST] Sending SSE data: ${sseEvent.substring(0, 100)}...`);
-
-			// Create parallel tasks for each connection
-			const broadcastTasks = Array.from(this.connections.entries()).map(([connectionId, connection]) => {
-				return this.sendToConnection(connectionId, connection, sseData);
+			// Format data as JSON message
+			const message = JSON.stringify({
+				type: 'tradeData',
+				data: data,
+				timestamp: Date.now()
 			});
 
-			// Execute all broadcasts in parallel with timeout
+			// Send to all connections in parallel
+			const broadcastTasks = Array.from(this.connections.entries()).map(([connectionId, connection]) => {
+				return this.sendToConnection(connectionId, connection, message);
+			});
+
+			// Wait for all broadcasts to complete
 			const results = await Promise.allSettled(broadcastTasks);
 
-			// Process results and clean up failed connections
-			const deadConnections: string[] = [];
-			results.forEach((result, index) => {
-				const connectionId = Array.from(this.connections.keys())[index];
-				if (result.status === 'rejected') {
-					deadConnections.push(connectionId);
-					console.log(`[ASYNC BROADCAST] Connection ${connectionId} failed:`, result.reason);
-				} else if (result.status === 'fulfilled' && !result.value) {
-					deadConnections.push(connectionId);
-					console.log(`[ASYNC BROADCAST] Connection ${connectionId} failed to send data`);
-				}
-			});
+			// Count successful sends
+			const successCount = results.filter(r => r.status === 'fulfilled' && r.value === true).length;
+			const failedCount = results.length - successCount;
 
-			// Remove dead connections
-			deadConnections.forEach(id => this.removeConnection(id, 'broadcast_failed'));
+			if (failedCount > 0) {
+				console.log(`🧹 Cleaned up ${failedCount} failed WebSocket connections`);
+			}
 
-			const successCount = results.filter(r => r.status === 'fulfilled' && r.value).length;
-			console.log(`[ASYNC BROADCAST] Completed: ${successCount}/${this.connections.size} connections notified`);
+			console.log(`WebSocket broadcast completed: ${successCount}/${this.connections.size} connections notified`);
 
 			return {
 				success: true,
 				connectionsNotified: successCount
 			};
 		} catch (error) {
-			console.error('[ASYNC BROADCAST] Error during broadcast:', error);
+			console.error('Error during WebSocket broadcast:', error);
 			return {
 				success: false,
 				connectionsNotified: 0
@@ -435,11 +344,59 @@ export class TradeDataGateway extends DurableObject<Env> {
 	}
 
 	/**
-	 * RPC method to handle SSE connections
+	 * Broadcast binary data to all WebSocket connections
 	 */
-	async handleSSEConnection(request: Request): Promise<Response> {
+	async publishBinaryData(binaryData: ArrayBuffer | Uint8Array): Promise<{ success: boolean; connectionsNotified: number }> {
+		console.log("Publishing binary data to WebSocket connections, size:", binaryData.byteLength);
+
 		try {
-			return await this.addConnection(request);
+			if (this.connections.size === 0) {
+				console.log('No WebSocket connections to broadcast to');
+				return { success: true, connectionsNotified: 0 };
+			}
+
+			console.log(`Broadcasting binary data to ${this.connections.size} WebSocket connections`);
+
+			// Convert to ArrayBuffer if it's Uint8Array
+			const arrayBuffer = binaryData instanceof Uint8Array ? binaryData.buffer : binaryData;
+
+			// Send to all connections in parallel
+			const broadcastTasks = Array.from(this.connections.entries()).map(([connectionId, connection]) => {
+				return this.sendToConnection(connectionId, connection, arrayBuffer);
+			});
+
+			// Wait for all broadcasts to complete
+			const results = await Promise.allSettled(broadcastTasks);
+
+			// Count successful sends
+			const successCount = results.filter(r => r.status === 'fulfilled' && r.value === true).length;
+			const failedCount = results.length - successCount;
+
+			if (failedCount > 0) {
+				console.log(`🧹 Cleaned up ${failedCount} failed WebSocket connections`);
+			}
+
+			console.log(`Binary broadcast completed: ${successCount}/${this.connections.size} connections notified`);
+
+			return {
+				success: true,
+				connectionsNotified: successCount
+			};
+		} catch (error) {
+			console.error('Error during binary broadcast:', error);
+			return {
+				success: false,
+				connectionsNotified: 0
+			};
+		}
+	}
+
+	/**
+	 * RPC method to handle WebSocket connections
+	 */
+	async handleWebSocketRequest(request: Request): Promise<Response> {
+		try {
+			return await this.handleWebSocketConnection(request);
 		} catch (error) {
 			return new Response('Internal Server Error', { status: 500 });
 		}
@@ -450,6 +407,53 @@ export class TradeDataGateway extends DurableObject<Env> {
 	 */
 	async getGatewayStats(): Promise<{ connectionCount: number; connections: any[] }> {
 		return this.getStats();
+	}
+
+	/**
+	 * Handle internal requests from the main worker (RPC)
+	 */
+	async fetch(request: Request): Promise<Response> {
+		const url = new URL(request.url);
+		const path = url.pathname;
+
+		try {
+			switch (path) {
+				case '/ws':
+					return await this.handleWebSocketConnection(request);
+
+				case '/publish-json':
+					if (request.method !== 'POST') {
+						return new Response('Method not allowed', { status: 405 });
+					}
+					const jsonData = await request.json();
+					const jsonResult = await this.publishData(jsonData);
+					return new Response(JSON.stringify(jsonResult), {
+						headers: { 'Content-Type': 'application/json' }
+					});
+
+				case '/publish-binary':
+					if (request.method !== 'POST') {
+						return new Response('Method not allowed', { status: 405 });
+					}
+					const binaryData = await request.arrayBuffer();
+					const binaryResult = await this.publishBinaryData(binaryData);
+					return new Response(JSON.stringify(binaryResult), {
+						headers: { 'Content-Type': 'application/json' }
+					});
+
+				case '/stats':
+					const stats = this.getStats();
+					return new Response(JSON.stringify(stats), {
+						headers: { 'Content-Type': 'application/json' }
+					});
+
+				default:
+					return new Response('Not Found', { status: 404 });
+			}
+		} catch (error) {
+			console.error('Error in Durable Object fetch:', error);
+			return new Response('Internal Server Error', { status: 500 });
+		}
 	}
 }
 
@@ -462,24 +466,20 @@ export default {
 
 		// Create Durable Object instance
 		const id: DurableObjectId = env.TRADE_GATEWAY.idFromName("main-gateway");
-		const gateway = env.TRADE_GATEWAY.get(id);
+		const gateway: DurableObjectStub<undefined> = env.TRADE_GATEWAY.get(id);
 
 		console.log(`[FETCH] Created Durable Object instance with ID: ${id}`);
 
-		// For global distribution, you could use:
-		// const region = getRegionFromRequest(request); // 'us', 'eu', 'asia'
-		// const id: DurableObjectId = env.TRADE_GATEWAY.idFromName(`gateway-${region}`);
-		// This creates separate instances per region for lower latency
-
 		try {
 			switch (path) {
-				case '/subscribe':
-					console.log(`[FETCH] Handling /subscribe request`);
-					// Handle SSE client connections
+				case '/ws':
+					console.log(`[FETCH] Handling /ws WebSocket upgrade request`);
+					// Handle WebSocket connections
 					if (request.method !== 'GET') {
 						return new Response('Method not allowed', { status: 405 });
 					}
-					return await gateway.handleSSEConnection(request);
+					console.log(`[FETCH] Calling gateway.fetch for WebSocket`);
+					return await gateway.fetch(request);
 
 				case '/publish':
 					if (request.method !== 'POST') {
@@ -488,35 +488,66 @@ export default {
 
 					const contentType = request.headers.get('content-type') || '';
 
-					if (contentType.includes('application/base64')) {
-						// Handle raw binary data
-						const binaryData = await request.arrayBuffer();
-						if (binaryData.byteLength == 0) {
-							return new Response('Empty data', { status: 400 });
-						}
-						const base64Data = btoa(String.fromCharCode(...new Uint8Array(binaryData)));
+					if (contentType.includes('application/json')) {
+						// Handle JSON data
+						const jsonData = await request.json();
 
-						// Start async broadcast - don't await it
-						const broadcastPromise = gateway.publishBinaryData(base64Data);
+						// Create request to Durable Object for JSON publishing
+						const publishRequest = new Request('http://localhost/publish-json', {
+							method: 'POST',
+							headers: { 'Content-Type': 'application/json' },
+							body: JSON.stringify(jsonData)
+						});
 
-						// Use waitUntil to ensure broadcast completes even after response is sent
-						ctx.waitUntil(broadcastPromise);
+						// Wait for broadcast to complete
+						const publishResponse = await gateway.fetch(publishRequest);
+						const broadcastResult = await publishResponse.json() as { success: boolean; connectionsNotified: number };
 
-						// Respond immediately without waiting for broadcast to complete
+						// Respond with broadcast results
 						return new Response(JSON.stringify({
-							success: true,
-							message: 'Data received and broadcasting asynchronously',
+							success: broadcastResult.success,
+							connectionsNotified: broadcastResult.connectionsNotified,
+							message: `Data broadcast to ${broadcastResult.connectionsNotified} WebSocket connections`,
+							timestamp: Date.now()
+						}), {
+							headers: { 'Content-Type': 'application/json' }
+						});
+					} else if (contentType.includes('application/octet-stream') || contentType.includes('application/binary')) {
+						// Handle binary data
+						const binaryData = await request.arrayBuffer();
+
+						// Create request to Durable Object for binary publishing
+						const publishRequest = new Request('http://localhost/publish-binary', {
+							method: 'POST',
+							headers: { 'Content-Type': 'application/octet-stream' },
+							body: binaryData
+						});
+
+						// Wait for broadcast to complete
+						const publishResponse = await gateway.fetch(publishRequest);
+						const broadcastResult = await publishResponse.json() as { success: boolean; connectionsNotified: number };
+
+						// Respond with broadcast results
+						return new Response(JSON.stringify({
+							success: broadcastResult.success,
+							connectionsNotified: broadcastResult.connectionsNotified,
+							message: `Binary data broadcast to ${broadcastResult.connectionsNotified} WebSocket connections`,
+							dataSize: binaryData.byteLength,
 							timestamp: Date.now()
 						}), {
 							headers: { 'Content-Type': 'application/json' }
 						});
 					} else {
-						return new Response('Unsupported content type. Use application/base64', { status: 415 });
+						return new Response('Unsupported content type. Use application/json for JSON data or application/octet-stream for binary data', { status: 415 });
 					}
 
 				case '/stats':
 					// Get gateway statistics
-					const stats = await gateway.getGatewayStats();
+					const statsRequest = new Request('http://localhost/stats', {
+						method: 'GET'
+					});
+					const statsResponse = await gateway.fetch(statsRequest);
+					const stats = await statsResponse.json();
 					return new Response(JSON.stringify(stats), {
 						headers: { 'Content-Type': 'application/json' }
 					});
@@ -593,20 +624,23 @@ export default {
 					console.log(`[FETCH] Handling root / request`);
 					// Health check / info endpoint
 					return new Response(JSON.stringify({
-						service: 'Trade Data SSE Gateway',
+						service: 'WebSocket Trade Data Gateway',
 						endpoints: {
-							'/subscribe': 'GET - Subscribe to trade data via SSE',
-							'/publish': 'POST - Publish base64 data (responds immediately, broadcasts async)',
-							'/stats': 'GET - Get connection statistics',
+							'/ws': 'GET - Connect to WebSocket for real-time trade data',
+							'/publish': 'POST - Publish data to all connected WebSocket clients (JSON: application/json, Binary: application/octet-stream)',
+							'/test': 'POST - Send test data to all connected WebSocket clients',
+							'/stats': 'GET - Get WebSocket connection statistics',
+							'/debug': 'GET - Get detailed WebSocket connection debug info',
 							'/pools': 'GET - List pools with pagination (?page=1&pageSize=20&chainId=1&protocol=uniswap)',
 							'/pools/add': 'POST - Add new pool information',
 							'/': 'GET - This info page'
 						},
 						features: [
-							'100ms timeout + immediate network error capture',
-							'Unhealthy after 5 consecutive timeouts OR any network error',
-							'Immediate removal of unhealthy connections',
-							'No background heartbeat overhead'
+							'WebSocket-based real-time communication',
+							'Support for both JSON and binary data',
+							'Immediate connection state detection',
+							'Bidirectional messaging support',
+							'Automatic dead connection cleanup'
 						],
 						timestamp: new Date().toISOString()
 					}), {

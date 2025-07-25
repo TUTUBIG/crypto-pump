@@ -10,7 +10,7 @@
 	"migrations": [
 		{
 			"new_sqlite_classes": [
-				"TradeDataGateway"
+				"WebSocketGateway"
 			],
 			"tag": "v1"
 		}
@@ -18,7 +18,7 @@
 	"durable_objects": {
 		"bindings": [
 			{
-				"class_name": "TradeDataGateway",
+				"class_name": "WebSocketGateway",
 				"name": "TRADE_GATEWAY"
 			}
 		]
