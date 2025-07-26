@@ -25,8 +25,6 @@ interface PoolInfo {
 
 interface PoolInfoWithId extends PoolInfo {
 	id: number;
-	created_at: string;
-	updated_at: string;
 }
 
 interface ListPoolsResponse {
@@ -77,6 +75,45 @@ async function addPool(db: D1Database, poolData: PoolInfo): Promise<{ success: b
 		success: true,
 		id: Number(result.meta.last_row_id) || 0
 	};
+}
+
+async function getPool(
+	db: D1Database,
+	chainId: string,
+	protocol: string,
+	poolAddress: string
+): Promise<PoolInfoWithId | null> {
+	const query = `
+		SELECT
+			id, chain_id, protocol, pool_address, pool_name,
+			cost_token_address, cost_token_symbol, cost_token_decimals,
+			get_token_address, get_token_symbol, get_token_decimals,
+			created_at, updated_at
+		FROM pool_info
+		WHERE chain_id = ? AND protocol = ? AND pool_address = ?
+		LIMIT 1
+	`;
+	const result = await db.prepare(query)
+		.bind(chainId, protocol, poolAddress)
+		.first();
+
+	if (!result) {
+		return null;
+	}
+
+	return {
+		id: Number(result.id),
+		ChainId: String(result.chain_id),
+		Protocol: String(result.protocol),
+		PoolAddress: String(result.pool_address),
+		PoolName: String(result.pool_name),
+		CostTokenAddress: String(result.cost_token_address),
+		CostTokenSymbol: String(result.cost_token_symbol),
+		CostTokenDecimals: Number(result.cost_token_decimals),
+		GetTokenAddress: String(result.get_token_address),
+		GetTokenSymbol: String(result.get_token_symbol),
+		GetTokenDecimals: Number(result.get_token_decimals),
+	}
 }
 
 async function listPools(
@@ -583,6 +620,36 @@ export default {
 					return new Response(JSON.stringify(stats), {
 						headers: { 'Content-Type': 'application/json' }
 					});
+
+				case '/pool':
+					// List pools with pagination
+					if (request.method !== 'GET') {
+						return new Response('Method not allowed', { status: 405 });
+					}
+
+					try {
+						const searchParams = url.searchParams;
+						const chainId = searchParams.get('chain_id');
+						const chainName = searchParams.get('chain_name');
+						const poolAddress = searchParams.get('pool_address');
+
+						if (!chainId || !poolAddress || !chainName) {
+							return new Response("Empty params",{
+								status: 400,
+							})
+						}
+
+						const result = await getPool(env.DB, chainId, chainName, poolAddress);
+						return new Response(JSON.stringify(result), {
+							headers: { 'Content-Type': 'application/json' }
+						});
+					} catch (error) {
+						console.error('Error listing pools:', error);
+						return new Response(JSON.stringify({ error: 'Failed to list pools' }), {
+							status: 500,
+							headers: { 'Content-Type': 'application/json' }
+						});
+					}
 
 				case '/pools':
 					// List pools with pagination
