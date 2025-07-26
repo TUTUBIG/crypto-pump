@@ -84,7 +84,8 @@ async function listPools(
 	page: number = 1,
 	pageSize: number = 20,
 	chainId?: string | null,
-	protocol?: string | null
+	protocol?: string | null,
+	poolAddress?: string | null,
 ): Promise<ListPoolsResponse> {
 	const offset = (page - 1) * pageSize;
 
@@ -102,8 +103,13 @@ async function listPools(
 		bindings.push(protocol);
 	}
 
+	if (poolAddress) {
+		whereClause += (chainId || protocol) ? ' AND pool_address = ?' : ' WHERE pool_address = ?';
+		bindings.push(poolAddress);
+	}
+
 	// Get total count
-	const countQuery = `SELECT COUNT(*) as count FROM pool_info${whereClause}`;
+	const countQuery = `SELECT COUNT(*) as count FROM pool_info ${whereClause}`;
 	const countResult = await db.prepare(countQuery).bind(...bindings).first();
 	const total = Number(countResult?.count) || 0;
 
@@ -114,7 +120,7 @@ async function listPools(
 			cost_token_address, cost_token_symbol, cost_token_decimals,
 			get_token_address, get_token_symbol, get_token_decimals,
 			created_at, updated_at
-		FROM pool_info${whereClause}
+		FROM pool_info ${whereClause}
 		ORDER BY created_at DESC
 		LIMIT ? OFFSET ?
 	`;
@@ -505,10 +511,6 @@ export default {
 						return new Response('Method not allowed', { status: 405 });
 					}
 					console.log(`[FETCH] Calling gateway.fetch for WebSocket`);
-					// Add CORS headers for WebSocket upgrade
-					// wsResponse.headers.set('Access-Control-Allow-Origin', '*');
-					// wsResponse.headers.set('Access-Control-Allow-Methods', 'GET, OPTIONS');
-					// wsResponse.headers.set('Access-Control-Allow-Headers', 'Content-Type');
 					return await gateway.fetch(request);
 
 				case '/publish':
@@ -591,11 +593,9 @@ export default {
 					try {
 						const searchParams = url.searchParams;
 						const page = parseInt(searchParams.get('page') || '1');
-						const pageSize = Math.min(parseInt(searchParams.get('pageSize') || '20'), 100); // Max 100 per page
-						const chainId = searchParams.get('chainId');
-						const protocol = searchParams.get('protocol');
+						const pageSize = Math.min(parseInt(searchParams.get('pageSize') || '20'), 300); // Max 100 per page
 
-						const result = await listPools(env.DB, page, pageSize, chainId, protocol);
+						const result = await listPools(env.DB, page, pageSize);
 						return new Response(JSON.stringify(result), {
 							headers: { 'Content-Type': 'application/json' }
 						});
@@ -652,21 +652,11 @@ export default {
 
 				case '/candle-chart':
 					console.log(`[FETCH] Handling /candle-chart request`);
-					const candleChartResponse = await handleCandleChart(request, env);
-					// Add CORS headers
-					candleChartResponse.headers.set('Access-Control-Allow-Origin', '*');
-					candleChartResponse.headers.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-					candleChartResponse.headers.set('Access-Control-Allow-Headers', 'Content-Type');
-					return candleChartResponse;
+					return await handleCandleChart(request, env);
 
 				case '/single-candle':
 					console.log(`[FETCH] Handling /single-candle request`);
-					const singleCandleResponse = await handleSingleCandle(request, env);
-					// Add CORS headers
-					singleCandleResponse.headers.set('Access-Control-Allow-Origin', '*');
-					singleCandleResponse.headers.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-					singleCandleResponse.headers.set('Access-Control-Allow-Headers', 'Content-Type');
-					return singleCandleResponse;
+					return await handleSingleCandle(request, env);
 
 				case '/':
 					console.log(`[FETCH] Handling root / request`);
@@ -676,9 +666,7 @@ export default {
 						endpoints: {
 							'/ws': 'GET - Connect to WebSocket for real-time trade data',
 							'/publish': 'POST - Publish data to all connected WebSocket clients (JSON: application/json, Binary: application/octet-stream)',
-							'/test': 'POST - Send test data to all connected WebSocket clients',
 							'/stats': 'GET - Get WebSocket connection statistics',
-							'/debug': 'GET - Get detailed WebSocket connection debug info',
 							'/pools': 'GET - List pools with pagination (?page=1&pageSize=20&chainId=1&protocol=uniswap)',
 							'/pools/add': 'POST - Add new pool information',
 							'/candle-chart': 'POST - Store candle chart data in KV',
@@ -715,9 +703,13 @@ export default {
 async function handleCandleChart(request: Request, env: Env): Promise<Response> {
 	try {
 		const url = new URL(request.url);
-		const tradePairId = url.searchParams.get('trade_pair_id') || '1';
+		const tradePairId = url.searchParams.get('trade_pair_id') || '';
 		const timeframe = url.searchParams.get('timeframe') || '60';
 		const page_index = url.searchParams.get('page') || '1';
+
+		if (tradePairId.toString() == '') {
+			return new Response('Empty trade_pair_id', { status: 400 });
+		}
 
 		// Calculate the date for the requested page
 		const page = parseInt(page_index, 10) || 1;
@@ -725,7 +717,6 @@ async function handleCandleChart(request: Request, env: Env): Promise<Response> 
 		// Clone the date to avoid mutating 'now'
 		const targetDate = new Date(now);
 		targetDate.setUTCDate(now.getUTCDate() - (page - 1));
-		targetDate.setUTCHours(0, 0, 0, 0);
 
 		// Format date as YYYY-MM-DD
 		const yyyy = targetDate.getUTCFullYear();
@@ -734,9 +725,7 @@ async function handleCandleChart(request: Request, env: Env): Promise<Response> 
 		const dateStr = `${yyyy}-${mm}-${dd}`;
 
 		// Compose the key for this day's candle data
-		//const key = `${tradePairId}-${timeframe}-${dateStr}`;
-
-		const key = "1-uniSwapV3-5afD198e7b0Ed5E2eDB1967879f85F4d7fe41972-60-2025-07-24"
+		const key = `${tradePairId}-${timeframe}-${dateStr}`;
 
 		// Retrieve candle data for this day from KV
 		const candleData = await env.KV.get(key, 'arrayBuffer');
@@ -761,13 +750,15 @@ async function handleCandleChart(request: Request, env: Env): Promise<Response> 
 async function handleSingleCandle(request: Request, env: Env): Promise<Response> {
 	try {
 		const url = new URL(request.url);
-		const tradePairId = url.searchParams.get('trade_pair_id') || '1';
+		const tradePairId = url.searchParams.get('trade_pair_id') || '';
 		const timeframe = url.searchParams.get('timeframe') || '60';
 
-		// Compose the key for this day's candle data
-		// const key = `${tradePairId}-${timeframe}-current`;
-		const key = "1-uniSwapV3-5afD198e7b0Ed5E2eDB1967879f85F4d7fe41972-60-current"
+		if (tradePairId.toString() == '') {
+			return new Response('Empty trade_pair_id', { status: 400 });
+		}
 
+		// Compose the key for this day's candle data
+		const key = `${tradePairId}-${timeframe}-current`;
 
 		// Retrieve candle data for this day from KV
 		const candleData = await env.KV.get(key, 'arrayBuffer');
