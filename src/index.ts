@@ -11,16 +11,16 @@ import { DurableObject } from 'cloudflare:workers';
  */
 
 interface PoolInfo {
-	ChainId: string;
-	Protocol: string;
-	PoolAddress: string;
-	PoolName: string;
-	CostTokenAddress: string;
-	CostTokenSymbol: string;
-	CostTokenDecimals: number;
-	GetTokenAddress: string;
-	GetTokenSymbol: string;
-	GetTokenDecimals: number;
+	chain_id: string;
+	protocol: string;
+	pool_address: string;
+	pool_name: string;
+	cost_token_address: string;
+	cost_token_symbol: string;
+	cost_token_decimals: number;
+	get_token_address: string;
+	get_token_symbol: string;
+	get_token_decimals: number;
 }
 
 interface PoolInfoWithId extends PoolInfo {
@@ -55,16 +55,16 @@ async function addPool(db: D1Database, poolData: PoolInfo): Promise<{ success: b
 			get_token_address, get_token_symbol, get_token_decimals
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`).bind(
-		poolData.ChainId,
-		poolData.Protocol,
-		poolData.PoolAddress,
-		poolData.PoolName,
-		poolData.CostTokenAddress,
-		poolData.CostTokenSymbol,
-		poolData.CostTokenDecimals,
-		poolData.GetTokenAddress,
-		poolData.GetTokenSymbol,
-		poolData.GetTokenDecimals
+		poolData.chain_id,
+		poolData.protocol,
+		poolData.pool_address,
+		poolData.pool_name,
+		poolData.cost_token_address,
+		poolData.cost_token_symbol,
+		poolData.cost_token_decimals,
+		poolData.get_token_address,
+		poolData.get_token_symbol,
+		poolData.get_token_decimals
 	).run();
 
 	if (!result.success) {
@@ -87,8 +87,7 @@ async function getPool(
 		SELECT
 			id, chain_id, protocol, pool_address, pool_name,
 			cost_token_address, cost_token_symbol, cost_token_decimals,
-			get_token_address, get_token_symbol, get_token_decimals,
-			created_at, updated_at
+			get_token_address, get_token_symbol, get_token_decimals
 		FROM pool_info
 		WHERE chain_id = ? AND protocol = ? AND pool_address = ?
 		LIMIT 1
@@ -103,16 +102,16 @@ async function getPool(
 
 	return {
 		id: Number(result.id),
-		ChainId: String(result.chain_id),
-		Protocol: String(result.protocol),
-		PoolAddress: String(result.pool_address),
-		PoolName: String(result.pool_name),
-		CostTokenAddress: String(result.cost_token_address),
-		CostTokenSymbol: String(result.cost_token_symbol),
-		CostTokenDecimals: Number(result.cost_token_decimals),
-		GetTokenAddress: String(result.get_token_address),
-		GetTokenSymbol: String(result.get_token_symbol),
-		GetTokenDecimals: Number(result.get_token_decimals),
+		chain_id: String(result.chain_id),
+		protocol: String(result.protocol),
+		pool_address: String(result.pool_address),
+		pool_name: String(result.pool_name),
+		cost_token_address: String(result.cost_token_address),
+		cost_token_symbol: String(result.cost_token_symbol),
+		cost_token_decimals: Number(result.cost_token_decimals),
+		get_token_address: String(result.get_token_address),
+		get_token_symbol: String(result.get_token_symbol),
+		get_token_decimals: Number(result.get_token_decimals),
 	}
 }
 
@@ -155,8 +154,7 @@ async function listPools(
 		SELECT
 			id, chain_id, protocol, pool_address, pool_name,
 			cost_token_address, cost_token_symbol, cost_token_decimals,
-			get_token_address, get_token_symbol, get_token_decimals,
-			created_at, updated_at
+			get_token_address, get_token_symbol, get_token_decimals
 		FROM pool_info ${whereClause}
 		ORDER BY created_at DESC
 		LIMIT ? OFFSET ?
@@ -168,18 +166,16 @@ async function listPools(
 
 	const pools: PoolInfoWithId[] = dataResult.results.map((row: any) => ({
 		id: row.id,
-		ChainId: row.chain_id,
-		Protocol: row.protocol,
-		PoolAddress: row.pool_address,
-		PoolName: row.pool_name,
-		CostTokenAddress: row.cost_token_address,
-		CostTokenSymbol: row.cost_token_symbol,
-		CostTokenDecimals: row.cost_token_decimals,
-		GetTokenAddress: row.get_token_address,
-		GetTokenSymbol: row.get_token_symbol,
-		GetTokenDecimals: row.get_token_decimals,
-		created_at: row.created_at,
-		updated_at: row.updated_at
+		chain_id: row.chain_id,
+		protocol: row.protocol,
+		pool_address: row.pool_address,
+		pool_name: row.pool_name,
+		cost_token_address: row.cost_token_address,
+		cost_token_symbol: row.cost_token_symbol,
+		cost_token_decimals: row.cost_token_decimals,
+		get_token_address: row.get_token_address,
+		get_token_symbol: row.get_token_symbol,
+		get_token_decimals: row.get_token_decimals
 	}));
 
 	const totalPages = Math.ceil(total / pageSize);
@@ -377,7 +373,7 @@ export class WebSocketGateway extends DurableObject<Env> {
 			const results = await Promise.allSettled(broadcastTasks);
 
 			// Count successful sends
-			const successCount = results.filter(r => r.status === 'fulfilled' && r.value === true).length;
+			const successCount = results.filter(r => r.status === 'fulfilled' && r.value).length;
 			const failedCount = results.length - successCount;
 
 			if (failedCount > 0) {
@@ -425,7 +421,7 @@ export class WebSocketGateway extends DurableObject<Env> {
 			const results = await Promise.allSettled(broadcastTasks);
 
 			// Count successful sends
-			const successCount = results.filter(r => r.status === 'fulfilled' && r.value === true).length;
+			const successCount = results.filter(r => r.status === 'fulfilled' && r.value).length;
 			const failedCount = results.length - successCount;
 
 			if (failedCount > 0) {
@@ -630,16 +626,16 @@ export default {
 					try {
 						const searchParams = url.searchParams;
 						const chainId = searchParams.get('chain_id');
-						const chainName = searchParams.get('chain_name');
+						const protocolName = searchParams.get('protocol_name');
 						const poolAddress = searchParams.get('pool_address');
 
-						if (!chainId || !poolAddress || !chainName) {
+						if (!chainId || !poolAddress || !protocolName) {
 							return new Response("Empty params",{
 								status: 400,
 							})
 						}
 
-						const result = await getPool(env.DB, chainId, chainName, poolAddress);
+						const result = await getPool(env.DB, chainId, protocolName, poolAddress);
 						return new Response(JSON.stringify(result), {
 							headers: { 'Content-Type': 'application/json' }
 						});
@@ -663,7 +659,7 @@ export default {
 						const pageSize = Math.min(parseInt(searchParams.get('pageSize') || '20'), 300); // Max 100 per page
 
 						const result = await listPools(env.DB, page, pageSize);
-						return new Response(JSON.stringify(result), {
+						return new Response(JSON.stringify(result.pools), {
 							headers: { 'Content-Type': 'application/json' }
 						});
 					} catch (error) {
@@ -684,9 +680,9 @@ export default {
 						const poolData: PoolInfo = await request.json();
 
 						// Validate required fields
-						if (!poolData.ChainId || !poolData.PoolAddress || !poolData.Protocol) {
+						if (!poolData.chain_id || !poolData.pool_address || !poolData.protocol) {
 							return new Response(JSON.stringify({
-								error: 'Missing required fields: ChainId, PoolAddress, Protocol'
+								error: 'Missing required fields: chain_id, pool_address, protocol'
 							}), {
 								status: 400,
 								headers: { 'Content-Type': 'application/json' }

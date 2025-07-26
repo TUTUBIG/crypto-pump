@@ -10,9 +10,7 @@ CREATE TABLE IF NOT EXISTS pool_info (
     cost_token_decimals INTEGER NOT NULL,
     get_token_address TEXT NOT NULL,
     get_token_symbol TEXT NOT NULL,
-    get_token_decimals INTEGER NOT NULL,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    get_token_decimals INTEGER NOT NULL
 );
 
 -- Create indexes for common queries
@@ -23,4 +21,4 @@ CREATE INDEX IF NOT EXISTS idx_pool_get_token_symbol ON pool_info(get_token_symb
 CREATE INDEX IF NOT EXISTS idx_pool_created_at ON pool_info(created_at);
 
 -- Create unique constraint for chain_id + pool_address combination
-CREATE UNIQUE INDEX IF NOT EXISTS idx_pool_unique ON pool_info(chain_id, pool_address); 
+CREATE UNIQUE INDEX IF NOT EXISTS idx_pool_unique ON pool_info(chain_id, pool_address);
