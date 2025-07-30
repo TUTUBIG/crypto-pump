@@ -41,9 +41,9 @@ interface ListPoolsResponse {
 
 interface WebSocketConnection {
 	id: string;
-	webSocket: WebSocket;
 	createdAt: number;
 	lastHeartbeat: number;
+	subscribedPools: Set<string>; // Track which pools this connection is subscribed to
 }
 
 // Database helper functions
@@ -194,111 +194,216 @@ async function listPools(
 }
 
 export class WebSocketGateway extends DurableObject<Env> {
-	private connections: Map<string, WebSocketConnection> = new Map();
+	private connections: Map<WebSocket, WebSocketConnection> = new Map();
 
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env);
-
-		// Enable WebSocket hibernation for cost savings
-		this.setupHibernation();
+		this.connections = new Map();
+		this.ctx.getWebSockets().forEach((ws) => {
+			let meta = ws.deserializeAttachment();
+			this.connections.set(ws, meta);
+		})
 	}
 
 	/**
-	 * Set up WebSocket hibernation to reduce costs
-	 */
-	private setupHibernation() {
-		// Note: WebSocket hibernation is automatically enabled
-		// Cloudflare Workers will hibernate WebSockets when idle
-		console.log('💤 WebSocket hibernation enabled for cost savings');
-	}
-
-
-
-	/**
-	 * Handle WebSocket connection
+	 * Handle WebSocket connection using native Cloudflare Workers API
 	 */
 	async handleWebSocketConnection(request: Request): Promise<Response> {
+
+		if (request.headers.get("Upgrade") != "websocket") {
+			return new Response("expected websocket", {status: 400});
+		}
+
 		const connectionId = crypto.randomUUID();
 		console.log(`🔗 NEW WEBSOCKET CONNECTION: ${connectionId}`);
 
 		// Create WebSocket pair
-		const [client, server] = Object.values(new WebSocketPair());
+		const pair= new WebSocketPair();
 
 		// Store connection
 		const now = Date.now();
-		this.connections.set(connectionId, {
+		const connection = {
 			id: connectionId,
-			webSocket: server,
 			createdAt: now,
-			lastHeartbeat: now
+			lastHeartbeat: now,
+			subscribedPools: new Set<string>()
+		}
+		this.connections.set(pair[1], connection);
+
+		pair[1].serializeAttachment(connection)
+
+		// Use native Cloudflare Workers Durable Object API to accept WebSocket
+		this.ctx.acceptWebSocket(pair[1], [connectionId]);
+
+		// Send welcome message with reconnection info
+		const welcomeMessage = JSON.stringify({
+			type: 'connected',
+			connectionId,
+			message: 'Connected to WebSocket trade data stream',
+			timestamp: now,
+			reconnected: false
 		});
-
-		// Set up WebSocket event handlers
-		server.accept();
-
-		// Send welcome message (optional - can be removed if causing browser warnings)
-		// const welcomeMessage = JSON.stringify({
-		// 	type: 'connected',
-		// 	connectionId,
-		// 	message: 'Connected to WebSocket trade data stream',
-		// 	timestamp: now
-		// });
-		// server.send(welcomeMessage);
-
-		// Handle WebSocket events
-		server.addEventListener('message', (event) => {
-			try {
-				const data = JSON.parse(event.data as string);
-				console.log(`📨 Message from ${connectionId}:`, data);
-
-				// Handle different message types
-				if (data.type === 'ping') {
-					const pongMessage = JSON.stringify({
-						response: 'pong',
-						timestamp: Date.now()
-					});
-					server.send(pongMessage);
-				}
-			} catch (error) {
-				console.log(`❌ Error parsing message from ${connectionId}:`, error);
-			}
-		});
-
-		server.addEventListener('close', (event) => {
-			console.log(`🔌 WEBSOCKET CLOSED: ${connectionId} (code: ${event.code}, reason: ${event.reason})`);
-			this.removeConnection(connectionId, 'client_disconnect');
-		});
-
-		server.addEventListener('error', (event) => {
-			console.log(`🔌 WebSocket error event for ${connectionId}:`, event);
-			this.removeConnection(connectionId, 'websocket_error');
-		});
+		pair[1].send(welcomeMessage);
 
 		console.log(`✅ WebSocket connection established: ${connectionId} (total: ${this.connections.size})`);
 
 		return new Response(null, {
 			status: 101,
-			webSocket: client
+			webSocket: pair[0]
 		});
+	}
+
+	/**
+	 * Native Cloudflare Workers WebSocket message handler
+	 */
+	async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
+		// Try to find connection by WebSocket instance first (most reliable)
+		const connection = this.connections.get(ws);
+
+		if (connection) {
+			console.log(`✅ Found connection via WebSocket instance: ${connection.id}`);
+			await this.handleMessage(ws, connection, message);
+			return;
+		}
+
+		console.log('❌ Received message from unknown WebSocket connection');
+		console.log('🔍 WebSocket instance:', ws);
+		console.log('🔍 Available connections:', Array.from(this.connections.keys()));
+
+		// Send error message to client about connection recovery failure
+		try {
+			const errorMessage = JSON.stringify({
+				type: 'connection_error',
+				error: 'Connection state lost. Please reconnect.',
+				timestamp: Date.now()
+			});
+			ws.send(errorMessage);
+		} catch (sendError) {
+			console.log('❌ Could not send error message');
+		}
+	}
+
+	/**
+	 * Handle WebSocket message processing
+	 */
+	private async handleMessage(ws: WebSocket, connection: WebSocketConnection, message: string | ArrayBuffer): Promise<void> {
+		try {
+			if (typeof message === 'string') {
+				const data = JSON.parse(message);
+				console.log(`📨 Message from ${connection.id}:`, data);
+
+				// Handle different message types
+				if (data.data_type === 'ping') {
+					const pongMessage = JSON.stringify({
+						response: 'pong',
+						timestamp: Date.now()
+					});
+					ws.send(pongMessage);
+				} else if (data.data_type === 'subscribe') {
+					// Handle pool subscription
+					if (data.trade_pair_id) {
+						connection.subscribedPools.add(data.trade_pair_id);
+						ws.serializeAttachment(connection)
+
+						console.log(`📋 ${connection.id} subscribed to pool: ${data.trade_pair_id}`);
+
+						const response = JSON.stringify({
+							type: 'subscribed',
+							poolId: data.trade_pair_id,
+							subscribedPools: Array.from(connection.subscribedPools),
+							timestamp: Date.now()
+						});
+						ws.send(response);
+					}
+				} else if (data.data_type === 'unsubscribe') {
+					// Handle pool unsubscription
+					if (data.trade_pair_id) {
+						connection.subscribedPools.delete(data.trade_pair_id);
+						ws.serializeAttachment(connection)
+						console.log(`📋 ${connection.id} unsubscribed from pool: ${data.trade_pair_id}`);
+
+						const response = JSON.stringify({
+							type: 'unsubscribed',
+							poolId: data.trade_pair_id,
+							subscribedPools: Array.from(connection.subscribedPools),
+							timestamp: Date.now()
+						});
+						ws.send(response);
+					}
+				} else if (data.data_type === 'list_subscriptions') {
+					// List current subscriptions
+					const response = JSON.stringify({
+						type: 'subscriptions',
+						subscribedPools: Array.from(connection.subscribedPools),
+						timestamp: Date.now()
+					});
+					ws.send(response);
+				} else if (data.data_type === 'validate_connection') {
+					// Validate connection is still active
+					const response = JSON.stringify({
+						type: 'connection_valid',
+						connectionId: connection.id,
+						timestamp: Date.now()
+					});
+					ws.send(response);
+				}
+			} else {
+				console.log(`📨 Binary message from ${connection.id}, size: ${message.byteLength}`);
+			}
+		} catch (error) {
+			console.log(`❌ Error parsing message from ${connection.id}:`, error);
+		}
+	}
+
+	/**
+	 * Native Cloudflare Workers WebSocket close handler
+	 */
+	async webSocketClose(ws: WebSocket, code: number, reason: string, wasClean: boolean): Promise<void> {
+		// Try to find connection by WebSocket instance first
+		const connection = this.connections.get(ws);
+
+		if (connection) {
+			console.log(`🔌 WEBSOCKET CLOSED: ${connection.id} (code: ${code}, reason: ${reason}, wasClean: ${wasClean})`);
+			this.removeConnection(ws, 'client_disconnect');
+			return;
+		}
+
+		console.log('❌ Received close from unknown WebSocket connection');
+	}
+
+	/**
+	 * Native Cloudflare Workers WebSocket error handler
+	 */
+	async webSocketError(ws: WebSocket, error: unknown): Promise<void> {
+		// Try to find connection by WebSocket instance first
+		const connection = this.connections.get(ws);
+
+		if (connection) {
+			console.log(`🔌 WebSocket error for ${connection.id}:`, error);
+			this.removeConnection(ws, 'websocket_error');
+			return;
+		}
+
+		console.log('❌ Received error from unknown WebSocket connection');
 	}
 
 	/**
 	 * Remove a connection and clean up resources
 	 */
-	private removeConnection(connectionId: string, reason: string = 'unknown') {
-		const connection = this.connections.get(connectionId);
+	private removeConnection(ws: WebSocket, reason: string = 'unknown') {
+		const connection = this.connections.get(ws);
 		if (connection) {
 			// Close the WebSocket
 			try {
-				connection.webSocket.close(1000, 'Connection removed');
+				ws.close(1000, 'Connection removed');
 			} catch (error) {
 				// WebSocket might already be closed
 			}
 
 			// Remove from connections map
-			this.connections.delete(connectionId);
+			this.connections.delete(ws);
 
-			console.log(`❌ REMOVED WEBSOCKET: ${connectionId} (reason: ${reason})`);
+			console.log(`❌ REMOVED WEBSOCKET: ${connection.id} (reason: ${reason})`);
 			console.log(`📊 Remaining connections: ${this.connections.size}`);
 		}
 	}
@@ -306,22 +411,22 @@ export class WebSocketGateway extends DurableObject<Env> {
 	/**
 	 * Send data to a single WebSocket connection
 	 */
-	private async sendToConnection(connectionId: string, connection: WebSocketConnection, data: string | ArrayBuffer): Promise<boolean> {
+	private async sendToConnection(ws: WebSocket, connection: WebSocketConnection, data: string | ArrayBuffer): Promise<boolean> {
 		return new Promise((resolve) => {
 			// 100ms timeout for dead connection detection
 			const timeout = setTimeout(() => {
-				console.log(`⏰ Timeout sending to WebSocket ${connectionId}`);
+				console.log(`⏰ Timeout sending to WebSocket ${connection.id}`);
 				resolve(false);
 			}, 100);
 
 			try {
-				connection.webSocket.send(data);
+				ws.send(data);
 				clearTimeout(timeout);
 				resolve(true);
 			} catch (error) {
 				clearTimeout(timeout);
-				console.log(`❌ WebSocket send error for ${connectionId}:`, error);
-				this.removeConnection(connectionId, 'send_error');
+				console.log(`❌ WebSocket send error for ${connection.id}:`, error);
+				this.removeConnection(ws, 'send_error');
 				resolve(false);
 			}
 		});
@@ -339,7 +444,7 @@ export class WebSocketGateway extends DurableObject<Env> {
 				createdAt: new Date(conn.createdAt).toISOString(),
 				lastHeartbeat: new Date(conn.lastHeartbeat).toISOString(),
 				ageSeconds: Math.floor((now - conn.createdAt) / 1000),
-				readyState: conn.webSocket.readyState
+				subscribedPools: Array.from(conn.subscribedPools)
 			}))
 		};
 	}
@@ -347,8 +452,8 @@ export class WebSocketGateway extends DurableObject<Env> {
 	/**
 	 * Broadcast data to all WebSocket connections
 	 */
-	async publishData(data: any): Promise<{ success: boolean; connectionsNotified: number }> {
-		console.log("Publishing data to WebSocket connections");
+	async publishData(data: any, targetPoolId?: string): Promise<{ success: boolean; connectionsNotified: number }> {
+		console.log(`Publishing data to WebSocket connections${targetPoolId ? ` for pool: ${targetPoolId}` : ''}`);
 
 		try {
 			if (this.connections.size === 0) {
@@ -356,36 +461,52 @@ export class WebSocketGateway extends DurableObject<Env> {
 				return { success: true, connectionsNotified: 0 };
 			}
 
-			console.log(`Broadcasting to ${this.connections.size} WebSocket connections`);
+							// Format data as JSON message (without custom type to avoid browser warnings)
+		const message = JSON.stringify({
+			data: data,
+			poolId: targetPoolId,
+			timestamp: Date.now()
+		});
 
-			// Format data as JSON message (without custom type to avoid browser warnings)
-			const message = JSON.stringify({
-				data: data,
-				timestamp: Date.now()
-			});
+		// Iterate through connections and filter in the loop
+		const broadcastTasks: Promise<boolean>[] = [];
+		let targetCount = 0;
 
-			// Send to all connections in parallel
-			const broadcastTasks = Array.from(this.connections.entries()).map(([connectionId, connection]) => {
-				return this.sendToConnection(connectionId, connection, message);
-			});
-
-			// Wait for all broadcasts to complete
-			const results = await Promise.allSettled(broadcastTasks);
-
-			// Count successful sends
-			const successCount = results.filter(r => r.status === 'fulfilled' && r.value).length;
-			const failedCount = results.length - successCount;
-
-			if (failedCount > 0) {
-				console.log(`🧹 Cleaned up ${failedCount} failed WebSocket connections`);
+		for (const [ws, connection] of this.connections) {
+			// Filter logic in the loop
+			if (targetPoolId && !connection.subscribedPools.has(targetPoolId)) {
+				continue; // Skip this connection
 			}
 
-			console.log(`WebSocket broadcast completed: ${successCount}/${this.connections.size} connections notified`);
+			// Add to broadcast tasks
+			broadcastTasks.push(this.sendToConnection(ws, connection, message));
+			targetCount++;
+		}
 
-			return {
-				success: true,
-				connectionsNotified: successCount
-			};
+		if (targetCount === 0) {
+			console.log('No subscribed connections to broadcast to');
+			return { success: true, connectionsNotified: 0 };
+		}
+
+		console.log(`📋 Broadcasting to ${targetCount} connections${targetPoolId ? ` subscribed to pool: ${targetPoolId}` : ''}`);
+
+					// Wait for all broadcasts to complete
+		const results = await Promise.allSettled(broadcastTasks);
+
+		// Count successful sends
+		const successCount = results.filter(r => r.status === 'fulfilled' && r.value).length;
+		const failedCount = results.length - successCount;
+
+		if (failedCount > 0) {
+			console.log(`🧹 Cleaned up ${failedCount} failed WebSocket connections`);
+		}
+
+		console.log(`WebSocket broadcast completed: ${successCount}/${targetCount} connections notified`);
+
+		return {
+			success: true,
+			connectionsNotified: successCount
+		};
 		} catch (error) {
 			console.error('Error during WebSocket broadcast:', error);
 			return {
@@ -398,8 +519,8 @@ export class WebSocketGateway extends DurableObject<Env> {
 	/**
 	 * Broadcast binary data to all WebSocket connections
 	 */
-	async publishBinaryData(binaryData: ArrayBuffer | Uint8Array): Promise<{ success: boolean; connectionsNotified: number }> {
-		console.log("Publishing binary data to WebSocket connections, size:", binaryData.byteLength);
+	async publishBinaryData(binaryData: ArrayBuffer | Uint8Array, targetPoolId?: string): Promise<{ success: boolean; connectionsNotified: number }> {
+		console.log(`Publishing binary data to WebSocket connections${targetPoolId ? ` for pool: ${targetPoolId}` : ''}, size:`, binaryData.byteLength);
 
 		try {
 			if (this.connections.size === 0) {
@@ -407,15 +528,30 @@ export class WebSocketGateway extends DurableObject<Env> {
 				return { success: true, connectionsNotified: 0 };
 			}
 
-			console.log(`Broadcasting binary data to ${this.connections.size} WebSocket connections`);
-
 			// Convert to ArrayBuffer if it's Uint8Array
 			const arrayBuffer = binaryData instanceof Uint8Array ? binaryData.buffer : binaryData;
 
-			// Send to all connections in parallel
-			const broadcastTasks = Array.from(this.connections.entries()).map(([connectionId, connection]) => {
-				return this.sendToConnection(connectionId, connection, arrayBuffer);
-			});
+			// Iterate through connections and filter in the loop
+			const broadcastTasks: Promise<boolean>[] = [];
+			let targetCount = 0;
+
+			for (const [ws, connection] of this.connections) {
+				// Filter logic in the loop
+				if (targetPoolId && !connection.subscribedPools.has(targetPoolId)) {
+					continue; // Skip this connection
+				}
+
+				// Add to broadcast tasks
+				broadcastTasks.push(this.sendToConnection(ws, connection, arrayBuffer));
+				targetCount++;
+			}
+
+			if (targetCount === 0) {
+				console.log('No subscribed connections to broadcast to');
+				return { success: true, connectionsNotified: 0 };
+			}
+
+			console.log(`📋 Broadcasting binary data to ${targetCount} connections${targetPoolId ? ` subscribed to pool: ${targetPoolId}` : ''}`);
 
 			// Wait for all broadcasts to complete
 			const results = await Promise.allSettled(broadcastTasks);
@@ -428,7 +564,7 @@ export class WebSocketGateway extends DurableObject<Env> {
 				console.log(`🧹 Cleaned up ${failedCount} failed WebSocket connections`);
 			}
 
-			console.log(`Binary broadcast completed: ${successCount}/${this.connections.size} connections notified`);
+			console.log(`Binary broadcast completed: ${successCount}/${targetCount} connections notified`);
 
 			return {
 				success: true,
@@ -441,24 +577,6 @@ export class WebSocketGateway extends DurableObject<Env> {
 				connectionsNotified: 0
 			};
 		}
-	}
-
-	/**
-	 * RPC method to handle WebSocket connections
-	 */
-	async handleWebSocketRequest(request: Request): Promise<Response> {
-		try {
-			return await this.handleWebSocketConnection(request);
-		} catch (error) {
-			return new Response('Internal Server Error', { status: 500 });
-		}
-	}
-
-	/**
-	 * RPC method to get gateway statistics
-	 */
-	async getGatewayStats(): Promise<{ connectionCount: number; connections: any[] }> {
-		return this.getStats();
 	}
 
 	/**
@@ -478,7 +596,8 @@ export class WebSocketGateway extends DurableObject<Env> {
 						return new Response('Method not allowed', { status: 405 });
 					}
 					const jsonData = await request.json();
-					const jsonResult = await this.publishData(jsonData);
+					const targetPoolId = request.headers.get('Customized-Pool-Id');
+					const jsonResult = await this.publishData(jsonData, targetPoolId || undefined);
 					return new Response(JSON.stringify(jsonResult), {
 						headers: { 'Content-Type': 'application/json' }
 					});
@@ -488,7 +607,8 @@ export class WebSocketGateway extends DurableObject<Env> {
 						return new Response('Method not allowed', { status: 405 });
 					}
 					const binaryData = await request.arrayBuffer();
-					const binaryResult = await this.publishBinaryData(binaryData);
+					const binaryTargetPoolId = request.headers.get('Customized-Pool-Id');
+					const binaryResult = await this.publishBinaryData(binaryData, binaryTargetPoolId || undefined);
 					return new Response(JSON.stringify(binaryResult), {
 						headers: { 'Content-Type': 'application/json' }
 					});
@@ -520,7 +640,7 @@ export default {
 		const id: DurableObjectId = env.TRADE_GATEWAY.idFromName("main-gateway");
 		const gateway: DurableObjectStub<undefined> = env.TRADE_GATEWAY.get(id);
 
-		console.log(`[FETCH] Created Durable Object instance with ID: ${id}`);
+		console.log(`[FETCH] GET Durable Object instance with ID: ${id}`);
 
 		try {
 			// Handle CORS preflight requests
@@ -556,11 +676,17 @@ export default {
 					if (contentType.includes('application/json')) {
 						// Handle JSON data
 						const jsonData = await request.json();
+						const targetPoolId = request.headers.get('Customized-Pool-Id');
 
 						// Create request to Durable Object for JSON publishing
+						const publishHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
+						if (targetPoolId) {
+							publishHeaders['Customized-Pool-Id'] = targetPoolId;
+						}
+
 						const publishRequest = new Request('http://localhost/publish-json', {
 							method: 'POST',
-							headers: { 'Content-Type': 'application/json' },
+							headers: publishHeaders,
 							body: JSON.stringify(jsonData)
 						});
 
@@ -572,7 +698,8 @@ export default {
 						return new Response(JSON.stringify({
 							success: broadcastResult.success,
 							connectionsNotified: broadcastResult.connectionsNotified,
-							message: `Data broadcast to ${broadcastResult.connectionsNotified} WebSocket connections`,
+							message: `Data broadcast to ${broadcastResult.connectionsNotified} WebSocket connections${targetPoolId ? ` for pool: ${targetPoolId}` : ''}`,
+							poolId: targetPoolId,
 							timestamp: Date.now()
 						}), {
 							headers: { 'Content-Type': 'application/json' }
@@ -580,11 +707,17 @@ export default {
 					} else if (contentType.includes('application/octet-stream') || contentType.includes('application/binary')) {
 						// Handle binary data
 						const binaryData = await request.arrayBuffer();
+						const binaryTargetPoolId = request.headers.get('Customized-Pool-Id');
 
 						// Create request to Durable Object for binary publishing
+						const publishHeaders: Record<string, string> = { 'Content-Type': 'application/octet-stream' };
+						if (binaryTargetPoolId) {
+							publishHeaders['Customized-Pool-Id'] = binaryTargetPoolId;
+						}
+
 						const publishRequest = new Request('http://localhost/publish-binary', {
 							method: 'POST',
-							headers: { 'Content-Type': 'application/octet-stream' },
+							headers: publishHeaders,
 							body: binaryData
 						});
 
@@ -596,7 +729,8 @@ export default {
 						return new Response(JSON.stringify({
 							success: broadcastResult.success,
 							connectionsNotified: broadcastResult.connectionsNotified,
-							message: `Binary data broadcast to ${broadcastResult.connectionsNotified} WebSocket connections`,
+							message: `Binary data broadcast to ${broadcastResult.connectionsNotified} WebSocket connections${binaryTargetPoolId ? ` for pool: ${binaryTargetPoolId}` : ''}`,
+							poolId: binaryTargetPoolId,
 							dataSize: binaryData.byteLength,
 							timestamp: Date.now()
 						}), {
@@ -665,6 +799,70 @@ export default {
 					} catch (error) {
 						console.error('Error listing pools:', error);
 						return new Response(JSON.stringify({ error: 'Failed to list pools' }), {
+							status: 500,
+							headers: { 'Content-Type': 'application/json' }
+						});
+					}
+
+				case '/pools/search':
+					// Search pools with pagination
+					if (request.method !== 'GET') {
+						return new Response('Method not allowed', { status: 405 });
+					}
+
+					try {
+						const searchParams = url.searchParams;
+						const query = searchParams.get('q') || '';
+
+						if (!query) {
+							return new Response(JSON.stringify({
+								error: 'Missing search query parameter "q"'
+							}), {
+								status: 400,
+								headers: { 'Content-Type': 'application/json' }
+							});
+						}
+
+						// Fuzzy search by pool_name (case-insensitive, partial match), top 10 results
+						const db = env.DB;
+
+						const dataResult = await db.prepare(
+							`SELECT
+								id, chain_id, protocol, pool_address, pool_name,
+								cost_token_address, cost_token_symbol, cost_token_decimals,
+								get_token_address, get_token_symbol, get_token_decimals
+							FROM pool_info
+							WHERE LOWER(pool_name) LIKE ?
+							ORDER BY created_at DESC
+							LIMIT 10`
+						).bind(`%${query.toLowerCase()}%`).all();
+
+						const pools: PoolInfoWithId[] = dataResult.results.map((row: any) => ({
+							id: row.id,
+							chain_id: row.chain_id,
+							protocol: row.protocol,
+							pool_address: row.pool_address,
+							pool_name: row.pool_name,
+							cost_token_address: row.cost_token_address,
+							cost_token_symbol: row.cost_token_symbol,
+							cost_token_decimals: row.cost_token_decimals,
+							get_token_address: row.get_token_address,
+							get_token_symbol: row.get_token_symbol,
+							get_token_decimals: row.get_token_decimals
+						}));
+
+						return new Response(JSON.stringify({ pools }), {
+							headers: {
+								'Content-Type': 'application/binary',
+								'Access-Control-Allow-Origin': '*',
+								'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+								'Access-Control-Allow-Headers': 'Content-Type',
+								'Access-Control-Max-Age': '86400'
+							}
+						});
+					} catch (error) {
+						console.error('Error searching pools:', error);
+						return new Response(JSON.stringify({ error: 'Failed to search pools' }), {
 							status: 500,
 							headers: { 'Content-Type': 'application/json' }
 						});
@@ -767,7 +965,7 @@ async function handleCandleChart(request: Request, env: Env): Promise<Response> 
 	try {
 		const url = new URL(request.url);
 		const tradePairId = url.searchParams.get('trade_pair_id') || '';
-		const timeframe = url.searchParams.get('timeframe') || '60';
+		const timeframe = url.searchParams.get('time_frame') || '60';
 		const page_index = url.searchParams.get('page') || '1';
 
 		if (tradePairId.toString() == '') {
@@ -794,7 +992,13 @@ async function handleCandleChart(request: Request, env: Env): Promise<Response> 
 		const candleData = await env.KV.get(key, 'arrayBuffer');
 
 		return new Response(candleData, {
-			headers: { 'Content-Type': 'application/binary' }
+			headers: {
+				'Content-Type': 'application/binary',
+				'Access-Control-Allow-Origin': '*',
+				'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+				'Access-Control-Allow-Headers': 'Content-Type',
+				'Access-Control-Max-Age': '86400'
+			}
 		});
 	} catch (error) {
 		return new Response(JSON.stringify({
@@ -827,7 +1031,13 @@ async function handleSingleCandle(request: Request, env: Env): Promise<Response>
 		const candleData = await env.KV.get(key, 'arrayBuffer');
 
 		return new Response(candleData, {
-			headers: { 'Content-Type': 'application/binary' }
+			headers: {
+				'Content-Type': 'application/binary',
+				'Access-Control-Allow-Origin': '*',
+				'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+				'Access-Control-Allow-Headers': 'Content-Type',
+				'Access-Control-Max-Age': '86400'
+			}
 		});
 	} catch (error) {
 		return new Response(JSON.stringify({
