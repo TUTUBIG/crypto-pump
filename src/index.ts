@@ -27,6 +27,11 @@ interface PoolInfoWithId extends PoolInfo {
 	id: number;
 }
 
+interface TokenInfo {
+	address: string;
+	volume_usd: number;
+}
+
 interface ListPoolsResponse {
 	pools: PoolInfoWithId[];
 	pagination: {
@@ -190,6 +195,36 @@ async function listPools(
 			hasNext: page < totalPages,
 			hasPrev: page > 1
 		}
+	};
+}
+
+async function addToken(db: D1Database, tokenData: TokenInfo): Promise<{ success: boolean; id: number }> {
+	const result = await db.prepare(`
+		INSERT INTO tokens (
+			chain_id, protocol, pool_address, pool_name,
+			cost_token_address, cost_token_symbol, cost_token_decimals,
+			get_token_address, get_token_symbol, get_token_decimals
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`).bind(
+		poolData.chain_id,
+		poolData.protocol,
+		poolData.pool_address,
+		poolData.pool_name,
+		poolData.cost_token_address,
+		poolData.cost_token_symbol,
+		poolData.cost_token_decimals,
+		poolData.get_token_address,
+		poolData.get_token_symbol,
+		poolData.get_token_decimals
+	).run();
+
+	if (!result.success) {
+		throw new Error('Failed to insert pool data');
+	}
+
+	return {
+		success: true,
+		id: Number(result.meta.last_row_id) || 0
 	};
 }
 
@@ -676,12 +711,12 @@ export default {
 					if (contentType.includes('application/json')) {
 						// Handle JSON data
 						const jsonData = await request.json();
-						const targetPoolId = request.headers.get('Customized-Pool-Id');
+						const targetTokenAddress = request.headers.get('Customized-Token-Address');
 
 						// Create request to Durable Object for JSON publishing
 						const publishHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
-						if (targetPoolId) {
-							publishHeaders['Customized-Pool-Id'] = targetPoolId;
+						if (targetTokenAddress) {
+							publishHeaders['Customized-Token-Address'] = targetTokenAddress;
 						}
 
 						const publishRequest = new Request('http://localhost/publish-json', {
@@ -698,8 +733,8 @@ export default {
 						return new Response(JSON.stringify({
 							success: broadcastResult.success,
 							connectionsNotified: broadcastResult.connectionsNotified,
-							message: `Data broadcast to ${broadcastResult.connectionsNotified} WebSocket connections${targetPoolId ? ` for pool: ${targetPoolId}` : ''}`,
-							poolId: targetPoolId,
+							message: `Data broadcast to ${broadcastResult.connectionsNotified} WebSocket connections${targetTokenAddress ? ` for token: ${targetTokenAddress}` : ''}`,
+							tokenAddress: targetTokenAddress,
 							timestamp: Date.now()
 						}), {
 							headers: { 'Content-Type': 'application/json' }
@@ -879,6 +914,49 @@ export default {
 
 						// Validate required fields
 						if (!poolData.chain_id || !poolData.pool_address || !poolData.protocol) {
+							return new Response(JSON.stringify({
+								error: 'Missing required fields: chain_id, pool_address, protocol'
+							}), {
+								status: 400,
+								headers: { 'Content-Type': 'application/json' }
+							});
+						}
+
+						const result = await addPool(env.DB, poolData);
+						return new Response(JSON.stringify(result), {
+							status: 201,
+							headers: { 'Content-Type': 'application/json' }
+						});
+					} catch (error) {
+						console.error('Error adding pool:', error);
+
+						// Handle duplicate pool address error
+						if (error instanceof Error && error.message.includes('UNIQUE constraint failed')) {
+							return new Response(JSON.stringify({
+								error: 'Pool already exists with this address and chain ID'
+							}), {
+								status: 201,
+								headers: { 'Content-Type': 'application/json' }
+							});
+						}
+
+						return new Response(JSON.stringify({ error: 'Failed to add pool' }), {
+							status: 500,
+							headers: { 'Content-Type': 'application/json' }
+						});
+					}
+
+				case '/tokens/add':
+					// Add new pool
+					if (request.method !== 'POST') {
+						return new Response('Method not allowed', { status: 405 });
+					}
+
+					try {
+						const token: TokenInfo = await request.json();
+
+						// Validate required fields
+						if (!token.address || !token.volume_usd) {
 							return new Response(JSON.stringify({
 								error: 'Missing required fields: chain_id, pool_address, protocol'
 							}), {
