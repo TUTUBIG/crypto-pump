@@ -10,6 +10,11 @@ import { DurableObject } from 'cloudflare:workers';
  * - Store and retrieve pool information using D1 database
  */
 
+interface DBQuery {
+	sql_template: string;
+	sql_arguments: [unknown];
+}
+
 interface PoolInfo {
 	chain_id: string;
 	protocol: string;
@@ -227,6 +232,43 @@ async function addToken(db: D1Database, tokenData: TokenInfo): Promise<{ success
 		id: Number(result.meta.last_row_id) || 0
 	};
 }
+
+async function getToken(
+	db: D1Database,
+	tokenAddress: string
+): Promise<PoolInfoWithId | null> {
+	const query = `
+		SELECT
+			id, chain_id, protocol, pool_address, pool_name,
+			cost_token_address, cost_token_symbol, cost_token_decimals,
+			get_token_address, get_token_symbol, get_token_decimals
+		FROM pool_info
+		WHERE chain_id = ? AND protocol = ? AND pool_address = ?
+		LIMIT 1
+	`;
+	const result = await db.prepare(query)
+		.bind(chainId, protocol, poolAddress)
+		.first();
+
+	if (!result) {
+		return null;
+	}
+
+	return {
+		id: Number(result.id),
+		chain_id: String(result.chain_id),
+		protocol: String(result.protocol),
+		pool_address: String(result.pool_address),
+		pool_name: String(result.pool_name),
+		cost_token_address: String(result.cost_token_address),
+		cost_token_symbol: String(result.cost_token_symbol),
+		cost_token_decimals: Number(result.cost_token_decimals),
+		get_token_address: String(result.get_token_address),
+		get_token_symbol: String(result.get_token_symbol),
+		get_token_decimals: Number(result.get_token_decimals),
+	}
+}
+
 
 export class WebSocketGateway extends DurableObject<Env> {
 	private connections: Map<WebSocket, WebSocketConnection> = new Map();
@@ -946,49 +988,6 @@ export default {
 						});
 					}
 
-				case '/tokens/add':
-					// Add new pool
-					if (request.method !== 'POST') {
-						return new Response('Method not allowed', { status: 405 });
-					}
-
-					try {
-						const token: TokenInfo = await request.json();
-
-						// Validate required fields
-						if (!token.address || !token.volume_usd) {
-							return new Response(JSON.stringify({
-								error: 'Missing required fields: chain_id, pool_address, protocol'
-							}), {
-								status: 400,
-								headers: { 'Content-Type': 'application/json' }
-							});
-						}
-
-						const result = await addPool(env.DB, poolData);
-						return new Response(JSON.stringify(result), {
-							status: 201,
-							headers: { 'Content-Type': 'application/json' }
-						});
-					} catch (error) {
-						console.error('Error adding pool:', error);
-
-						// Handle duplicate pool address error
-						if (error instanceof Error && error.message.includes('UNIQUE constraint failed')) {
-							return new Response(JSON.stringify({
-								error: 'Pool already exists with this address and chain ID'
-							}), {
-								status: 201,
-								headers: { 'Content-Type': 'application/json' }
-							});
-						}
-
-						return new Response(JSON.stringify({ error: 'Failed to add pool' }), {
-							status: 500,
-							headers: { 'Content-Type': 'application/json' }
-						});
-					}
-
 				case '/candle-chart':
 					console.log(`[FETCH] Handling /candle-chart request`);
 					return await handleCandleChart(request, env);
@@ -1024,6 +1023,31 @@ export default {
 					}), {
 						headers: { 'Content-Type': 'application/json' }
 					});
+
+				case '/db':
+					if (request.method !== 'GET') {
+						return new Response('Method not allowed', { status: 405 });
+					}
+
+					try {
+						const query: DBQuery = await request.json();
+
+						if (!query || query.sql_template == "") {
+							return new Response(JSON.stringify({
+								error: 'Missing required param: query sql'
+							}), {
+								status: 400,
+								headers: { 'Content-Type': 'application/json' }
+							});
+						}
+
+						const result = await env.DB.prepare(query.sql_template).bind(...query.sql_arguments).all()
+
+
+					} catch (error) {
+						console.error('Error listing db:', error);
+						return new Response('Internal Server Error',{ status: 500 });
+					}
 
 				default:
 					return new Response('Not Found', { status: 404 });
