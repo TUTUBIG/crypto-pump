@@ -33,8 +33,13 @@ interface PoolInfoWithId extends PoolInfo {
 }
 
 interface TokenInfo {
-	address: string;
-	volume_usd: number;
+    chain_id: string;
+    token_address: string;
+    token_symbol: string;
+    token_name: string;
+    decimals: number;
+    icon_url?: string;
+    daily_volume_usd?: number;
 }
 
 interface ListPoolsResponse {
@@ -204,69 +209,140 @@ async function listPools(
 }
 
 async function addToken(db: D1Database, tokenData: TokenInfo): Promise<{ success: boolean; id: number }> {
-	const result = await db.prepare(`
-		INSERT INTO tokens (
-			chain_id, protocol, pool_address, pool_name,
-			cost_token_address, cost_token_symbol, cost_token_decimals,
-			get_token_address, get_token_symbol, get_token_decimals
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`).bind(
-		poolData.chain_id,
-		poolData.protocol,
-		poolData.pool_address,
-		poolData.pool_name,
-		poolData.cost_token_address,
-		poolData.cost_token_symbol,
-		poolData.cost_token_decimals,
-		poolData.get_token_address,
-		poolData.get_token_symbol,
-		poolData.get_token_decimals
-	).run();
+    const result = await db.prepare(`
+        INSERT INTO tokens (chain_id, token_address, token_symbol, token_name, decimals, icon_url, daily_volume_usd) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).bind(
+        tokenData.chain_id,
+        tokenData.token_address,
+        tokenData.token_symbol,
+        tokenData.token_name,
+        tokenData.decimals,
+        tokenData.icon_url || '',
+        tokenData.daily_volume_usd || 0,
+    ).run();
 
-	if (!result.success) {
-		throw new Error('Failed to insert pool data');
-	}
+    if (!result.success) {
+        throw new Error('Failed to insert token data');
+    }
 
-	return {
-		success: true,
-		id: Number(result.meta.last_row_id) || 0
-	};
+    return {
+        success: true,
+        id: Number(result.meta.last_row_id) || 0
+    };
 }
 
 async function getToken(
-	db: D1Database,
-	tokenAddress: string
-): Promise<PoolInfoWithId | null> {
-	const query = `
-		SELECT
-			id, chain_id, protocol, pool_address, pool_name,
-			cost_token_address, cost_token_symbol, cost_token_decimals,
-			get_token_address, get_token_symbol, get_token_decimals
-		FROM pool_info
-		WHERE chain_id = ? AND protocol = ? AND pool_address = ?
-		LIMIT 1
-	`;
-	const result = await db.prepare(query)
-		.bind(chainId, protocol, poolAddress)
-		.first();
+    db: D1Database,
+    chainId: string,
+    tokenAddress: string
+): Promise<TokenInfo> {
+    const query = `
+        SELECT id, chain_id, token_address, token_symbol, token_name, decimals,
+               icon_url, daily_volume_usd, volume_updated_at, created_at, updated_at
+        FROM tokens
+        WHERE chain_id = ? AND token_address = ?
+        LIMIT 1
+    `;
+    const result = await db.prepare(query)
+        .bind(chainId, tokenAddress)
+        .first();
 
-	if (!result) {
-		return null;
-	}
+    if (!result) {
+        throw new Error('Token not found');
+    }
 
-	return {
-		id: Number(result.id),
-		chain_id: String(result.chain_id),
-		protocol: String(result.protocol),
-		pool_address: String(result.pool_address),
-		pool_name: String(result.pool_name),
-		cost_token_address: String(result.cost_token_address),
-		cost_token_symbol: String(result.cost_token_symbol),
-		cost_token_decimals: Number(result.cost_token_decimals),
-		get_token_address: String(result.get_token_address),
-		get_token_symbol: String(result.get_token_symbol),
-		get_token_decimals: Number(result.get_token_decimals),
-	}
+    return {
+        id: result.id,
+        chain_id: result.chain_id,
+        token_address: result.token_address,
+        token_symbol: result.token_symbol,
+        token_name: result.token_name,
+        decimals: result.decimals,
+        icon_url: result.icon_url,
+        daily_volume_usd: result.daily_volume_usd,
+        volume_updated_at: result.volume_updated_at,
+        created_at: result.created_at,
+        updated_at: result.updated_at
+    };
+}
+
+async function listTokens(
+    db: D1Database,
+    page: number = 1,
+    pageSize: number = 20,
+    chainId?: string
+): Promise<{ tokens: TokenInfo[]; total: number }> {
+    // Build query parts
+    let whereClause = '';
+    const bindings: any[] = [];
+
+    if (chainId) {
+        whereClause = 'WHERE chain_id = ?';
+        bindings.push(chainId);
+    }
+
+    // Get total count
+    const countResult = await db.prepare(
+        `SELECT COUNT(*) as count FROM tokens ${whereClause}`
+    ).bind(...bindings).first();
+
+    const total = Number(countResult?.count) || 0;
+
+    // Get paginated results
+    const offset = (page - 1) * pageSize;
+    bindings.push(pageSize, offset);
+
+    const result = await db.prepare(`
+        SELECT id, chain_id, token_address, token_symbol, token_name, decimals,
+               icon_url, daily_volume_usd, volume_updated_at, created_at, updated_at
+        FROM tokens
+        ${whereClause}
+        ORDER BY created_at DESC
+        LIMIT ? OFFSET ?
+    `).bind(...bindings).all();
+
+    const tokens = result.results.map((row: any) => ({
+        id: row.id,
+        chain_id: row.chain_id,
+        token_address: row.token_address,
+        token_symbol: row.token_symbol,
+        token_name: row.token_name,
+        decimals: row.decimals,
+        icon_url: row.icon_url,
+        daily_volume_usd: row.daily_volume_usd,
+        volume_updated_at: row.volume_updated_at,
+        created_at: row.created_at,
+        updated_at: row.updated_at
+    }));
+
+    return { tokens, total };
+}
+
+async function deleteToken(
+    db: D1Database,
+    chainId: string,
+    tokenAddress: string
+): Promise<boolean> {
+    const result = await db.prepare(
+        'DELETE FROM tokens WHERE chain_id = ? AND token_address = ?'
+    ).bind(chainId, tokenAddress).run();
+    return result.success;
+}
+
+async function updateTokenVolume(
+    db: D1Database,
+    chainId: string,
+    tokenAddress: string,
+    volumeUsd: string
+): Promise<boolean> {
+    const result = await db.prepare(`
+        UPDATE tokens
+        SET daily_volume_usd = ?,
+            volume_updated_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE chain_id = ? AND token_address = ?
+    `).bind(volumeUsd, chainId, tokenAddress).run();
+    return result.success;
 }
 
 
@@ -987,6 +1063,169 @@ export default {
 							headers: { 'Content-Type': 'application/json' }
 						});
 					}
+
+                case '/tokens':
+                    if (request.method === 'GET') {
+                        try {
+                            const searchParams = url.searchParams;
+                            const page = parseInt(searchParams.get('page') || '1');
+                            const pageSize = Math.min(parseInt(searchParams.get('pageSize') || '20'), 100);
+                            const chainId = searchParams.get('chainId') || undefined;
+
+                            const result = await listTokens(env.DB, page, pageSize, chainId);
+                            return new Response(JSON.stringify({
+                                tokens: result.tokens,
+                                pagination: {
+                                    page,
+                                    pageSize,
+                                    total: result.total,
+                                    totalPages: Math.ceil(result.total / pageSize)
+                                }
+                            }), {
+                                headers: { 'Content-Type': 'application/json' }
+                            });
+                        } catch (error) {
+                            console.error('Error listing tokens:', error);
+                            return new Response(JSON.stringify({ error: 'Failed to list tokens' }), {
+                                status: 500,
+                                headers: { 'Content-Type': 'application/json' }
+                            });
+                        }
+                    } else if (request.method === 'POST') {
+                        try {
+                            const tokenData: TokenInfo = await request.json();
+
+                            // Validate required fields
+                            if (!tokenData.chain_id || !tokenData.token_address || !tokenData.token_symbol || !tokenData.token_name || tokenData.decimals === undefined) {
+                                return new Response(JSON.stringify({
+                                    error: 'Missing required fields: chain_id, token_address, token_symbol, token_name, decimals'
+                                }), {
+                                    status: 400,
+                                    headers: { 'Content-Type': 'application/json' }
+                                });
+                            }
+
+                            const result = await addToken(env.DB, tokenData);
+                            return new Response(JSON.stringify(result), {
+                                status: 201,
+                                headers: { 'Content-Type': 'application/json' }
+                            });
+                        } catch (error) {
+                            console.error('Error adding token:', error);
+
+                            if (error instanceof Error && error.message.includes('UNIQUE constraint failed')) {
+                                return new Response(JSON.stringify({
+                                    error: 'Token already exists with this address and chain ID'
+                                }), {
+                                    status: 409,
+                                    headers: { 'Content-Type': 'application/json' }
+                                });
+                            }
+
+                            return new Response(JSON.stringify({ error: 'Failed to add token' }), {
+                                status: 500,
+                                headers: { 'Content-Type': 'application/json' }
+                            });
+                        }
+                    } else {
+                        return new Response('Method not allowed', { status: 405 });
+                    }
+                    break;
+
+                case '/tokens/:chainId/:address':
+                    const chainId = url.pathname.split('/')[2];
+                    const address = url.pathname.split('/')[3];
+
+                    if (!chainId || !address) {
+                        return new Response(JSON.stringify({ error: 'Missing chainId or address' }), {
+                            status: 400,
+                            headers: { 'Content-Type': 'application/json' }
+                        });
+                    }
+
+                    if (request.method === 'GET') {
+                        try {
+                            const token = await getToken(env.DB, chainId, address);
+                            return new Response(JSON.stringify(token), {
+                                headers: { 'Content-Type': 'application/json' }
+                            });
+                        } catch (error) {
+                            if (error instanceof Error && error.message === 'Token not found') {
+                                return new Response(JSON.stringify({ error: 'Token not found' }), {
+                                    status: 404,
+                                    headers: { 'Content-Type': 'application/json' }
+                                });
+                            }
+                            return new Response(JSON.stringify({ error: 'Failed to get token' }), {
+                                status: 500,
+                                headers: { 'Content-Type': 'application/json' }
+                            });
+                        }
+                    } else if (request.method === 'DELETE') {
+                        try {
+                            const success = await deleteToken(env.DB, chainId, address);
+                            if (success) {
+                                return new Response(JSON.stringify({ success: true }));
+                            } else {
+                                return new Response(JSON.stringify({ error: 'Token not found' }), {
+                                    status: 404,
+                                    headers: { 'Content-Type': 'application/json' }
+                                });
+                            }
+                        } catch (error) {
+                            return new Response(JSON.stringify({ error: 'Failed to delete token' }), {
+                                status: 500,
+                                headers: { 'Content-Type': 'application/json' }
+                            });
+                        }
+                    } else {
+                        return new Response('Method not allowed', { status: 405 });
+                    }
+                    break;
+
+                case '/tokens/:chainId/:address/volume':
+                    if (request.method !== 'PATCH') {
+                        return new Response('Method not allowed', { status: 405 });
+                    }
+
+                    const volumeChainId = url.pathname.split('/')[2];
+                    const volumeAddress = url.pathname.split('/')[3];
+
+                    if (!volumeChainId || !volumeAddress) {
+                        return new Response(JSON.stringify({ error: 'Missing chainId or address' }), {
+                            status: 400,
+                            headers: { 'Content-Type': 'application/json' }
+                        });
+                    }
+
+                    try {
+                        const { volume_usd } = await request.json();
+
+                        if (!volume_usd || typeof volume_usd !== 'string') {
+                            return new Response(JSON.stringify({
+                                error: 'volume_usd is required and must be a string'
+                            }), {
+                                status: 400,
+                                headers: { 'Content-Type': 'application/json' }
+                            });
+                        }
+
+                        const success = await updateTokenVolume(env.DB, volumeChainId, volumeAddress, volume_usd);
+                        if (success) {
+                            return new Response(JSON.stringify({ success: true }));
+                        } else {
+                            return new Response(JSON.stringify({ error: 'Token not found' }), {
+                                status: 404,
+                                headers: { 'Content-Type': 'application/json' }
+                            });
+                        }
+                    } catch (error) {
+                        return new Response(JSON.stringify({ error: 'Failed to update token volume' }), {
+                            status: 500,
+                            headers: { 'Content-Type': 'application/json' }
+                        });
+                    }
+                    break;
 
 				case '/candle-chart':
 					console.log(`[FETCH] Handling /candle-chart request`);
