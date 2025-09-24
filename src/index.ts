@@ -42,18 +42,6 @@ interface TokenInfo {
     daily_volume_usd?: number;
 }
 
-interface ListPoolsResponse {
-	pools: PoolInfoWithId[];
-	pagination: {
-		page: number;
-		pageSize: number;
-		total: number;
-		totalPages: number;
-		hasNext: boolean;
-		hasPrev: boolean;
-	};
-}
-
 interface WebSocketConnection {
 	id: string;
 	createdAt: number;
@@ -137,7 +125,7 @@ async function listPools(
 	chainId?: string | null,
 	protocol?: string | null,
 	poolAddress?: string | null,
-): Promise<ListPoolsResponse> {
+): Promise<PoolInfoWithId[]> {
 	const offset = (page - 1) * pageSize;
 
 	// Build WHERE clause dynamically
@@ -195,17 +183,7 @@ async function listPools(
 
 	const totalPages = Math.ceil(total / pageSize);
 
-	return {
-		pools,
-		pagination: {
-			page,
-			pageSize,
-			total,
-			totalPages,
-			hasNext: page < totalPages,
-			hasPrev: page > 1
-		}
-	};
+	return pools;
 }
 
 async function addToken(db: D1Database, tokenData: TokenInfo): Promise<{ success: boolean; id: number }> {
@@ -271,7 +249,7 @@ async function listTokens(
     page: number = 1,
     pageSize: number = 20,
     chainId?: string
-): Promise<{ tokens: TokenInfo[]; total: number }> {
+): Promise<TokenInfo[]> {
     // Build query parts
     let whereClause = '';
     const bindings: any[] = [];
@@ -301,21 +279,19 @@ async function listTokens(
         LIMIT ? OFFSET ?
     `).bind(...bindings).all();
 
-    const tokens = result.results.map((row: any) => ({
-        id: row.id,
-        chain_id: row.chain_id,
-        token_address: row.token_address,
-        token_symbol: row.token_symbol,
-        token_name: row.token_name,
-        decimals: row.decimals,
-        icon_url: row.icon_url,
-        daily_volume_usd: row.daily_volume_usd,
-        volume_updated_at: row.volume_updated_at,
-        created_at: row.created_at,
-        updated_at: row.updated_at
-    }));
-
-    return { tokens, total };
+	return result.results.map((row: any) => ({
+			id: row.id,
+			chain_id: row.chain_id,
+			token_address: row.token_address,
+			token_symbol: row.token_symbol,
+			token_name: row.token_name,
+			decimals: row.decimals,
+			icon_url: row.icon_url,
+			daily_volume_usd: row.daily_volume_usd,
+			volume_updated_at: row.volume_updated_at,
+			created_at: row.created_at,
+			updated_at: row.updated_at
+		}));
 }
 
 async function deleteToken(
@@ -946,7 +922,7 @@ export default {
 						const pageSize = Math.min(parseInt(searchParams.get('pageSize') || '20'), 300); // Max 100 per page
 
 						const result = await listPools(env.DB, page, pageSize);
-						return new Response(JSON.stringify(result.pools), {
+						return new Response(JSON.stringify(result), {
 							headers: { 'Content-Type': 'application/json' }
 						});
 					} catch (error) {
@@ -1064,168 +1040,64 @@ export default {
 						});
 					}
 
-                case '/tokens':
-                    if (request.method === 'GET') {
-                        try {
-                            const searchParams = url.searchParams;
-                            const page = parseInt(searchParams.get('page') || '1');
-                            const pageSize = Math.min(parseInt(searchParams.get('pageSize') || '20'), 100);
-                            const chainId = searchParams.get('chainId') || undefined;
+				case '/tokens':
+						if (request.method === 'GET') {
+								try {
+										const searchParams = url.searchParams;
+										const page = parseInt(searchParams.get('page') || '1');
+										const pageSize = Math.min(parseInt(searchParams.get('pageSize') || '20'), 100);
+										const chainId = searchParams.get('chainId') || undefined;
 
-                            const result = await listTokens(env.DB, page, pageSize, chainId);
-                            return new Response(JSON.stringify({
-                                tokens: result.tokens,
-                                pagination: {
-                                    page,
-                                    pageSize,
-                                    total: result.total,
-                                    totalPages: Math.ceil(result.total / pageSize)
-                                }
-                            }), {
-                                headers: { 'Content-Type': 'application/json' }
-                            });
-                        } catch (error) {
-                            console.error('Error listing tokens:', error);
-                            return new Response(JSON.stringify({ error: 'Failed to list tokens' }), {
-                                status: 500,
-                                headers: { 'Content-Type': 'application/json' }
-                            });
-                        }
-                    } else if (request.method === 'POST') {
-                        try {
-                            const tokenData: TokenInfo = await request.json();
+										const result = await listTokens(env.DB, page, pageSize, chainId);
+										return new Response(JSON.stringify(result), {
+												headers: { 'Content-Type': 'application/json' }
+										});
+								} catch (error) {
+										console.error('Error listing tokens:', error);
+										return new Response(JSON.stringify({ error: 'Failed to list tokens' }), {
+												status: 500,
+												headers: { 'Content-Type': 'application/json' }
+										});
+								}
+						} else if (request.method === 'POST') {
+								try {
+										const tokenData: TokenInfo = await request.json();
 
-                            // Validate required fields
-                            if (!tokenData.chain_id || !tokenData.token_address || !tokenData.token_symbol || !tokenData.token_name || tokenData.decimals === undefined) {
-                                return new Response(JSON.stringify({
-                                    error: 'Missing required fields: chain_id, token_address, token_symbol, token_name, decimals'
-                                }), {
-                                    status: 400,
-                                    headers: { 'Content-Type': 'application/json' }
-                                });
-                            }
+										// Validate required fields
+										if (!tokenData.chain_id || !tokenData.token_address || !tokenData.token_symbol || !tokenData.token_name || tokenData.decimals === undefined) {
+												return new Response(JSON.stringify({
+														error: 'Missing required fields: chain_id, token_address, token_symbol, token_name, decimals'
+												}), {
+														status: 400,
+														headers: { 'Content-Type': 'application/json' }
+												});
+										}
 
-                            const result = await addToken(env.DB, tokenData);
-                            return new Response(JSON.stringify(result), {
-                                status: 201,
-                                headers: { 'Content-Type': 'application/json' }
-                            });
-                        } catch (error) {
-                            console.error('Error adding token:', error);
+										const result = await addToken(env.DB, tokenData);
+										return new Response(JSON.stringify(result), {
+												status: 201,
+												headers: { 'Content-Type': 'application/json' }
+										});
+								} catch (error) {
+										console.error('Error adding token:', error);
 
-                            if (error instanceof Error && error.message.includes('UNIQUE constraint failed')) {
-                                return new Response(JSON.stringify({
-                                    error: 'Token already exists with this address and chain ID'
-                                }), {
-                                    status: 409,
-                                    headers: { 'Content-Type': 'application/json' }
-                                });
-                            }
+										if (error instanceof Error && error.message.includes('UNIQUE constraint failed')) {
+												return new Response(JSON.stringify({
+														error: 'Token already exists with this address and chain ID'
+												}), {
+														status: 409,
+														headers: { 'Content-Type': 'application/json' }
+												});
+										}
 
-                            return new Response(JSON.stringify({ error: 'Failed to add token' }), {
-                                status: 500,
-                                headers: { 'Content-Type': 'application/json' }
-                            });
-                        }
-                    } else {
-                        return new Response('Method not allowed', { status: 405 });
-                    }
-                    break;
-
-                case '/tokens/:chainId/:address':
-                    const chainId = url.pathname.split('/')[2];
-                    const address = url.pathname.split('/')[3];
-
-                    if (!chainId || !address) {
-                        return new Response(JSON.stringify({ error: 'Missing chainId or address' }), {
-                            status: 400,
-                            headers: { 'Content-Type': 'application/json' }
-                        });
-                    }
-
-                    if (request.method === 'GET') {
-                        try {
-                            const token = await getToken(env.DB, chainId, address);
-                            return new Response(JSON.stringify(token), {
-                                headers: { 'Content-Type': 'application/json' }
-                            });
-                        } catch (error) {
-                            if (error instanceof Error && error.message === 'Token not found') {
-                                return new Response(JSON.stringify({ error: 'Token not found' }), {
-                                    status: 404,
-                                    headers: { 'Content-Type': 'application/json' }
-                                });
-                            }
-                            return new Response(JSON.stringify({ error: 'Failed to get token' }), {
-                                status: 500,
-                                headers: { 'Content-Type': 'application/json' }
-                            });
-                        }
-                    } else if (request.method === 'DELETE') {
-                        try {
-                            const success = await deleteToken(env.DB, chainId, address);
-                            if (success) {
-                                return new Response(JSON.stringify({ success: true }));
-                            } else {
-                                return new Response(JSON.stringify({ error: 'Token not found' }), {
-                                    status: 404,
-                                    headers: { 'Content-Type': 'application/json' }
-                                });
-                            }
-                        } catch (error) {
-                            return new Response(JSON.stringify({ error: 'Failed to delete token' }), {
-                                status: 500,
-                                headers: { 'Content-Type': 'application/json' }
-                            });
-                        }
-                    } else {
-                        return new Response('Method not allowed', { status: 405 });
-                    }
-                    break;
-
-                case '/tokens/:chainId/:address/volume':
-                    if (request.method !== 'PATCH') {
-                        return new Response('Method not allowed', { status: 405 });
-                    }
-
-                    const volumeChainId = url.pathname.split('/')[2];
-                    const volumeAddress = url.pathname.split('/')[3];
-
-                    if (!volumeChainId || !volumeAddress) {
-                        return new Response(JSON.stringify({ error: 'Missing chainId or address' }), {
-                            status: 400,
-                            headers: { 'Content-Type': 'application/json' }
-                        });
-                    }
-
-                    try {
-                        const { volume_usd } = await request.json();
-
-                        if (!volume_usd || typeof volume_usd !== 'string') {
-                            return new Response(JSON.stringify({
-                                error: 'volume_usd is required and must be a string'
-                            }), {
-                                status: 400,
-                                headers: { 'Content-Type': 'application/json' }
-                            });
-                        }
-
-                        const success = await updateTokenVolume(env.DB, volumeChainId, volumeAddress, volume_usd);
-                        if (success) {
-                            return new Response(JSON.stringify({ success: true }));
-                        } else {
-                            return new Response(JSON.stringify({ error: 'Token not found' }), {
-                                status: 404,
-                                headers: { 'Content-Type': 'application/json' }
-                            });
-                        }
-                    } catch (error) {
-                        return new Response(JSON.stringify({ error: 'Failed to update token volume' }), {
-                            status: 500,
-                            headers: { 'Content-Type': 'application/json' }
-                        });
-                    }
-                    break;
+										return new Response(JSON.stringify({ error: 'Failed to add token' }), {
+												status: 500,
+												headers: { 'Content-Type': 'application/json' }
+										});
+								}
+						} else {
+								return new Response('Method not allowed', { status: 405 });
+						}
 
 				case '/candle-chart':
 					console.log(`[FETCH] Handling /candle-chart request`);
