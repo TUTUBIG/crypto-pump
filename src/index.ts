@@ -20,12 +20,12 @@ interface PoolInfo {
 	protocol: string;
 	pool_address: string;
 	pool_name: string;
-	cost_token_address: string;
-	cost_token_symbol: string;
-	cost_token_decimals: number;
-	get_token_address: string;
-	get_token_symbol: string;
-	get_token_decimals: number;
+	token_0_address: string;
+	token_0_symbol: string;
+	token_0_decimals: number;
+	token_1_address: string;
+	token_1_symbol: string;
+	token_1_decimals: number;
 }
 
 interface PoolInfoWithId extends PoolInfo {
@@ -52,22 +52,18 @@ interface WebSocketConnection {
 // Database helper functions
 async function addPool(db: D1Database, poolData: PoolInfo): Promise<{ success: boolean; id: number }> {
 	const result = await db.prepare(`
-		INSERT INTO pool_info (
-			chain_id, protocol, pool_address, pool_name,
-			cost_token_address, cost_token_symbol, cost_token_decimals,
-			get_token_address, get_token_symbol, get_token_decimals
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO pool_info (chain_id, protocol, pool_address, pool_name,token_0_address, token_0_symbol, token_0_decimals,token_1_address, token_1_symbol, token_1_decimals) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`).bind(
 		poolData.chain_id,
 		poolData.protocol,
 		poolData.pool_address,
 		poolData.pool_name,
-		poolData.cost_token_address,
-		poolData.cost_token_symbol,
-		poolData.cost_token_decimals,
-		poolData.get_token_address,
-		poolData.get_token_symbol,
-		poolData.get_token_decimals
+		poolData.token_0_address,
+		poolData.token_0_symbol,
+		poolData.token_0_decimals,
+		poolData.token_1_address,
+		poolData.token_1_symbol,
+		poolData.token_1_decimals,
 	).run();
 
 	if (!result.success) {
@@ -89,8 +85,8 @@ async function getPool(
 	const query = `
 		SELECT
 			id, chain_id, protocol, pool_address, pool_name,
-			cost_token_address, cost_token_symbol, cost_token_decimals,
-			get_token_address, get_token_symbol, get_token_decimals
+			token_0_address, token_0_symbol, token_0_decimals,
+			token_1_address, token_1_symbol, token_1_decimals
 		FROM pool_info
 		WHERE chain_id = ? AND protocol = ? AND pool_address = ?
 		LIMIT 1
@@ -109,12 +105,12 @@ async function getPool(
 		protocol: String(result.protocol),
 		pool_address: String(result.pool_address),
 		pool_name: String(result.pool_name),
-		cost_token_address: String(result.cost_token_address),
-		cost_token_symbol: String(result.cost_token_symbol),
-		cost_token_decimals: Number(result.cost_token_decimals),
-		get_token_address: String(result.get_token_address),
-		get_token_symbol: String(result.get_token_symbol),
-		get_token_decimals: Number(result.get_token_decimals),
+		token_0_address: String(result.token_0_address),
+		token_0_symbol: String(result.token_0_symbol),
+		token_0_decimals: Number(result.token_0_decimals),
+		token_1_address: String(result.token_1_address),
+		token_1_symbol: String(result.token_1_symbol),
+		token_1_decimals: Number(result.token_1_decimals),
 	}
 }
 
@@ -156,8 +152,8 @@ async function listPools(
 	const dataQuery = `
 		SELECT
 			id, chain_id, protocol, pool_address, pool_name,
-			cost_token_address, cost_token_symbol, cost_token_decimals,
-			get_token_address, get_token_symbol, get_token_decimals
+			token_0_address, token_0_symbol, token_0_decimals,
+			token_1_address, token_1_symbol, token_1_decimals
 		FROM pool_info ${whereClause}
 		ORDER BY created_at DESC
 		LIMIT ? OFFSET ?
@@ -173,12 +169,12 @@ async function listPools(
 		protocol: row.protocol,
 		pool_address: row.pool_address,
 		pool_name: row.pool_name,
-		cost_token_address: row.cost_token_address,
-		cost_token_symbol: row.cost_token_symbol,
-		cost_token_decimals: row.cost_token_decimals,
-		get_token_address: row.get_token_address,
-		get_token_symbol: row.get_token_symbol,
-		get_token_decimals: row.get_token_decimals
+		token_0_address: row.token_0_address,
+		token_0_symbol: row.token_0_symbol,
+		token_0_decimals: row.token_0_decimals,
+		token_1_address: row.token_1_address,
+		token_1_symbol: row.token_1_symbol,
+		token_1_decimals: row.token_1_decimals
 	}));
 
 	const totalPages = Math.ceil(total / pageSize);
@@ -221,7 +217,7 @@ async function getToken(
         WHERE chain_id = ? AND token_address = ?
         LIMIT 1
     `;
-    const result = await db.prepare(query)
+    const result: any = await db.prepare(query)
         .bind(chainId, tokenAddress)
         .first();
 
@@ -230,18 +226,14 @@ async function getToken(
     }
 
     return {
-        id: result.id,
-        chain_id: result.chain_id,
-        token_address: result.token_address,
-        token_symbol: result.token_symbol,
-        token_name: result.token_name,
-        decimals: result.decimals,
-        icon_url: result.icon_url,
-        daily_volume_usd: result.daily_volume_usd,
-        volume_updated_at: result.volume_updated_at,
-        created_at: result.created_at,
-        updated_at: result.updated_at
-    };
+			chain_id: result.chain_id,
+			daily_volume_usd: result.daily_volume_usd,
+			decimals: result.decimals,
+			icon_url: result.icon_url,
+			token_address: result.token_address,
+			token_name: result.token_name,
+			token_symbol: result.token_symbol,
+		};
 }
 
 async function listTokens(
@@ -958,8 +950,8 @@ export default {
 						const dataResult = await db.prepare(
 							`SELECT
 								id, chain_id, protocol, pool_address, pool_name,
-								cost_token_address, cost_token_symbol, cost_token_decimals,
-								get_token_address, get_token_symbol, get_token_decimals
+								token_0_address, token_0_symbol, token_0_decimals,
+								token_1_address, token_1_symbol, token_1_decimals
 							FROM pool_info
 							WHERE LOWER(pool_name) LIKE ?
 							ORDER BY created_at DESC
@@ -972,12 +964,12 @@ export default {
 							protocol: row.protocol,
 							pool_address: row.pool_address,
 							pool_name: row.pool_name,
-							cost_token_address: row.cost_token_address,
-							cost_token_symbol: row.cost_token_symbol,
-							cost_token_decimals: row.cost_token_decimals,
-							get_token_address: row.get_token_address,
-							get_token_symbol: row.get_token_symbol,
-							get_token_decimals: row.get_token_decimals
+							token_0_address: row.token_0_address,
+							token_0_symbol: row.token_0_symbol,
+							token_0_decimals: row.token_0_decimals,
+							token_1_address: row.token_1_address,
+							token_1_symbol: row.token_1_symbol,
+							token_1_decimals: row.token_1_decimals
 						}));
 
 						return new Response(JSON.stringify({ pools }), {
