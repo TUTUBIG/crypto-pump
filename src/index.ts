@@ -46,7 +46,7 @@ interface WebSocketConnection {
 	id: string;
 	createdAt: number;
 	lastHeartbeat: number;
-	subscribedPools: Set<string>; // Track which pools this connection is subscribed to
+	subscribedPools: Set<string>; // Track which token this connection is subscribed to
 }
 
 // Database helper functions
@@ -421,31 +421,31 @@ export class WebSocketGateway extends DurableObject<Env> {
 					});
 					ws.send(pongMessage);
 				} else if (data.data_type === 'subscribe') {
-					// Handle pool subscription
-					if (data.trade_pair_id) {
-						connection.subscribedPools.add(data.trade_pair_id);
+					// Handle token subscription
+					if (data.token_id) {
+						connection.subscribedPools.add(data.token_id);
 						ws.serializeAttachment(connection)
 
-						console.log(`📋 ${connection.id} subscribed to pool: ${data.trade_pair_id}`);
+						console.log(`📋 ${connection.id} subscribed to token: ${data.token_id}`);
 
 						const response = JSON.stringify({
 							type: 'subscribed',
-							poolId: data.trade_pair_id,
+							poolId: data.token_id,
 							subscribedPools: Array.from(connection.subscribedPools),
 							timestamp: Date.now()
 						});
 						ws.send(response);
 					}
 				} else if (data.data_type === 'unsubscribe') {
-					// Handle pool unsubscription
-					if (data.trade_pair_id) {
-						connection.subscribedPools.delete(data.trade_pair_id);
+					// Handle token unsubscription
+					if (data.token_id) {
+						connection.subscribedPools.delete(data.token_id);
 						ws.serializeAttachment(connection)
-						console.log(`📋 ${connection.id} unsubscribed from pool: ${data.trade_pair_id}`);
+						console.log(`📋 ${connection.id} unsubscribed from pool: ${data.token_id}`);
 
 						const response = JSON.stringify({
 							type: 'unsubscribed',
-							poolId: data.trade_pair_id,
+							poolId: data.token_id,
 							subscribedPools: Array.from(connection.subscribedPools),
 							timestamp: Date.now()
 						});
@@ -640,8 +640,8 @@ export class WebSocketGateway extends DurableObject<Env> {
 	/**
 	 * Broadcast binary data to all WebSocket connections
 	 */
-	async publishBinaryData(binaryData: ArrayBuffer | Uint8Array, targetPoolId?: string): Promise<{ success: boolean; connectionsNotified: number }> {
-		console.log(`Publishing binary data to WebSocket connections${targetPoolId ? ` for pool: ${targetPoolId}` : ''}, size:`, binaryData.byteLength);
+	async publishBinaryData(binaryData: ArrayBuffer | Uint8Array, targetTokenId?: string): Promise<{ success: boolean; connectionsNotified: number }> {
+		console.log(`Publishing binary data to WebSocket connections${targetTokenId ? ` for pool: ${targetTokenId}` : ''}, size:`, binaryData.byteLength);
 
 		try {
 			if (this.connections.size === 0) {
@@ -658,7 +658,7 @@ export class WebSocketGateway extends DurableObject<Env> {
 
 			for (const [ws, connection] of this.connections) {
 				// Filter logic in the loop
-				if (targetPoolId && !connection.subscribedPools.has(targetPoolId)) {
+				if (targetTokenId && !connection.subscribedPools.has(targetTokenId)) {
 					continue; // Skip this connection
 				}
 
@@ -672,7 +672,7 @@ export class WebSocketGateway extends DurableObject<Env> {
 				return { success: true, connectionsNotified: 0 };
 			}
 
-			console.log(`📋 Broadcasting binary data to ${targetCount} connections${targetPoolId ? ` subscribed to pool: ${targetPoolId}` : ''}`);
+			console.log(`📋 Broadcasting binary data to ${targetCount} connections${targetTokenId ? ` subscribed to pool: ${targetTokenId}` : ''}`);
 
 			// Wait for all broadcasts to complete
 			const results = await Promise.allSettled(broadcastTasks);
@@ -728,8 +728,8 @@ export class WebSocketGateway extends DurableObject<Env> {
 						return new Response('Method not allowed', { status: 405 });
 					}
 					const binaryData = await request.arrayBuffer();
-					const binaryTargetPoolId = request.headers.get('Customized-Pool-Id');
-					const binaryResult = await this.publishBinaryData(binaryData, binaryTargetPoolId || undefined);
+					const binaryTargetTokenId = request.headers.get('Customized-Token-ID')!
+					const binaryResult = await this.publishBinaryData(binaryData, binaryTargetTokenId);
 					return new Response(JSON.stringify(binaryResult), {
 						headers: { 'Content-Type': 'application/json' }
 					});
@@ -828,13 +828,12 @@ export default {
 					} else if (contentType.includes('application/octet-stream') || contentType.includes('application/binary')) {
 						// Handle binary data
 						const binaryData = await request.arrayBuffer();
-						const binaryTargetPoolId = request.headers.get('Customized-Pool-Id');
+						const binaryTargetTokenId = request.headers.get('Customized-Token-ID')!;
 
 						// Create request to Durable Object for binary publishing
 						const publishHeaders: Record<string, string> = { 'Content-Type': 'application/octet-stream' };
-						if (binaryTargetPoolId) {
-							publishHeaders['Customized-Pool-Id'] = binaryTargetPoolId;
-						}
+						publishHeaders['Customized-Token-ID'] = binaryTargetTokenId;
+
 
 						const publishRequest = new Request('http://localhost/publish-binary', {
 							method: 'POST',
@@ -850,8 +849,8 @@ export default {
 						return new Response(JSON.stringify({
 							success: broadcastResult.success,
 							connectionsNotified: broadcastResult.connectionsNotified,
-							message: `Binary data broadcast to ${broadcastResult.connectionsNotified} WebSocket connections${binaryTargetPoolId ? ` for pool: ${binaryTargetPoolId}` : ''}`,
-							poolId: binaryTargetPoolId,
+							message: `Binary data broadcast to ${broadcastResult.connectionsNotified} WebSocket connections${binaryTargetTokenId ? ` for token: ${binaryTargetTokenId}` : ''}`,
+							poolId: binaryTargetTokenId,
 							dataSize: binaryData.byteLength,
 							timestamp: Date.now()
 						}), {
@@ -1222,7 +1221,7 @@ async function handleCandleChart(request: Request, env: Env): Promise<Response> 
 async function handleSingleCandle(request: Request, env: Env): Promise<Response> {
 	try {
 		const url = new URL(request.url);
-		const tradePairId = url.searchParams.get('trade_pair_id') || '';
+		const tradePairId = url.searchParams.get('token_id') || '';
 		const timeframe = url.searchParams.get('timeframe') || '60';
 
 		if (tradePairId.toString() == '') {
