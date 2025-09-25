@@ -414,13 +414,13 @@ export class WebSocketGateway extends DurableObject<Env> {
 				console.log(`📨 Message from ${connection.id}:`, data);
 
 				// Handle different message types
-				if (data.data_type === 'ping') {
+				if (data.action === 'ping') {
 					const pongMessage = JSON.stringify({
-						response: 'pong',
+						action: 'pong',
 						timestamp: Date.now()
 					});
 					ws.send(pongMessage);
-				} else if (data.data_type === 'subscribe') {
+				} else if (data.action === 'subscribe') {
 					// Handle token subscription
 					if (data.token_id) {
 						connection.subscribedPools.add(data.token_id);
@@ -429,14 +429,14 @@ export class WebSocketGateway extends DurableObject<Env> {
 						console.log(`📋 ${connection.id} subscribed to token: ${data.token_id}`);
 
 						const response = JSON.stringify({
-							type: 'subscribed',
-							poolId: data.token_id,
+							action: 'subscribed',
+							subscribe_id: data.token_id,
 							subscribedPools: Array.from(connection.subscribedPools),
 							timestamp: Date.now()
 						});
 						ws.send(response);
 					}
-				} else if (data.data_type === 'unsubscribe') {
+				} else if (data.action === 'unsubscribe') {
 					// Handle token unsubscription
 					if (data.token_id) {
 						connection.subscribedPools.delete(data.token_id);
@@ -444,29 +444,13 @@ export class WebSocketGateway extends DurableObject<Env> {
 						console.log(`📋 ${connection.id} unsubscribed from pool: ${data.token_id}`);
 
 						const response = JSON.stringify({
-							type: 'unsubscribed',
-							poolId: data.token_id,
+							action: 'unsubscribed',
+							status: 'success',
 							subscribedPools: Array.from(connection.subscribedPools),
 							timestamp: Date.now()
 						});
 						ws.send(response);
 					}
-				} else if (data.data_type === 'list_subscriptions') {
-					// List current subscriptions
-					const response = JSON.stringify({
-						type: 'subscriptions',
-						subscribedPools: Array.from(connection.subscribedPools),
-						timestamp: Date.now()
-					});
-					ws.send(response);
-				} else if (data.data_type === 'validate_connection') {
-					// Validate connection is still active
-					const response = JSON.stringify({
-						type: 'connection_valid',
-						connectionId: connection.id,
-						timestamp: Date.now()
-					});
-					ws.send(response);
 				}
 			} else {
 				console.log(`📨 Binary message from ${connection.id}, size: ${message.byteLength}`);
@@ -609,7 +593,7 @@ export class WebSocketGateway extends DurableObject<Env> {
 			return { success: true, connectionsNotified: 0 };
 		}
 
-		console.log(`📋 Broadcasting to ${targetCount} connections${targetPoolId ? ` subscribed to pool: ${targetPoolId}` : ''}`);
+		console.log(`📋 Broadcasting to ${targetCount} connections${targetPoolId ? ` subscribed to token: ${targetPoolId}` : ''}`);
 
 					// Wait for all broadcasts to complete
 		const results = await Promise.allSettled(broadcastTasks);
@@ -641,8 +625,7 @@ export class WebSocketGateway extends DurableObject<Env> {
 	 * Broadcast binary data to all WebSocket connections
 	 */
 	async publishBinaryData(binaryData: ArrayBuffer | Uint8Array, targetTokenId?: string): Promise<{ success: boolean; connectionsNotified: number }> {
-		console.log(`Publishing binary data to WebSocket connections${targetTokenId ? ` for pool: ${targetTokenId}` : ''}, size:`, binaryData.byteLength);
-
+		console.log(`Publishing binary data to WebSocket connections${targetTokenId ? ` for token: ${targetTokenId}` : ''}, size:`, binaryData.byteLength);
 		try {
 			if (this.connections.size === 0) {
 				console.log('No WebSocket connections to broadcast to');
@@ -659,6 +642,7 @@ export class WebSocketGateway extends DurableObject<Env> {
 			for (const [ws, connection] of this.connections) {
 				// Filter logic in the loop
 				if (targetTokenId && !connection.subscribedPools.has(targetTokenId)) {
+					console.log(targetTokenId,connection.subscribedPools)
 					continue; // Skip this connection
 				}
 
@@ -672,7 +656,7 @@ export class WebSocketGateway extends DurableObject<Env> {
 				return { success: true, connectionsNotified: 0 };
 			}
 
-			console.log(`📋 Broadcasting binary data to ${targetCount} connections${targetTokenId ? ` subscribed to pool: ${targetTokenId}` : ''}`);
+			console.log(`📋 Broadcasting binary data to ${targetCount} connections${targetTokenId ? ` subscribed to token: ${targetTokenId}` : ''}`);
 
 			// Wait for all broadcasts to complete
 			const results = await Promise.allSettled(broadcastTasks);
@@ -711,17 +695,6 @@ export class WebSocketGateway extends DurableObject<Env> {
 			switch (path) {
 				case '/ws':
 					return await this.handleWebSocketConnection(request);
-
-				case '/publish-json':
-					if (request.method !== 'POST') {
-						return new Response('Method not allowed', { status: 405 });
-					}
-					const jsonData = await request.json();
-					const targetPoolId = request.headers.get('Customized-Pool-Id');
-					const jsonResult = await this.publishData(jsonData, targetPoolId || undefined);
-					return new Response(JSON.stringify(jsonResult), {
-						headers: { 'Content-Type': 'application/json' }
-					});
 
 				case '/publish-binary':
 					if (request.method !== 'POST') {
@@ -1221,18 +1194,26 @@ async function handleCandleChart(request: Request, env: Env): Promise<Response> 
 async function handleSingleCandle(request: Request, env: Env): Promise<Response> {
 	try {
 		const url = new URL(request.url);
-		const tradePairId = url.searchParams.get('token_id') || '';
+		const tokenId = url.searchParams.get('token_id') || '';
 		const timeframe = url.searchParams.get('timeframe') || '60';
 
-		if (tradePairId.toString() == '') {
-			return new Response('Empty trade_pair_id', { status: 400 });
+		if (tokenId.toString() == '') {
+			return new Response('Empty token_id', { status: 400 });
 		}
 
 		// Compose the key for this day's candle data
-		const key = `${tradePairId}-${timeframe}-current`;
+		const key = `${tokenId}-${timeframe}-current`;
 
 		// Retrieve candle data for this day from KV
 		const candleData = await env.KV.get(key, 'arrayBuffer');
+
+		if (!candleData) {
+			return new Response(JSON.stringify({
+				success: false,
+				error: 'data not found'
+			}))
+		}
+
 
 		return new Response(candleData, {
 			headers: {
