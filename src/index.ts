@@ -1141,12 +1141,12 @@ export default {
 async function handleCandleChart(request: Request, env: Env): Promise<Response> {
 	try {
 		const url = new URL(request.url);
-		const tradePairId = url.searchParams.get('trade_pair_id') || '';
+		const tokenId = url.searchParams.get('token_id') || '';
 		const timeframe = url.searchParams.get('time_frame') || '60';
 		const page_index = url.searchParams.get('page') || '1';
 
-		if (tradePairId.toString() == '') {
-			return new Response('Empty trade_pair_id', { status: 400 });
+		if (tokenId.toString() == '') {
+			return new Response('Empty tokenId', { status: 400 });
 		}
 
 		// Calculate the date for the requested page
@@ -1163,14 +1163,14 @@ async function handleCandleChart(request: Request, env: Env): Promise<Response> 
 		const dateStr = `${yyyy}-${mm}-${dd}`;
 
 		// Compose the key for this day's candle data
-		const key = `${tradePairId}-${timeframe}-${dateStr}`;
+		const key = `${tokenId}-${timeframe}-${dateStr}`;
 
 		// Retrieve candle data for this day from KV
-		const candleData = await env.KV.get(key, 'arrayBuffer');
+		const candleData = await env.KV.get(key, 'text');
 
 		return new Response(candleData, {
 			headers: {
-				'Content-Type': 'application/binary',
+				'Content-Type': 'application/base64',
 				'Access-Control-Allow-Origin': '*',
 				'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
 				'Access-Control-Allow-Headers': 'Content-Type',
@@ -1205,7 +1205,7 @@ async function handleSingleCandle(request: Request, env: Env): Promise<Response>
 		const key = `${tokenId}-${timeframe}-current`;
 
 		// Retrieve candle data for this day from KV
-		const candleData = await env.KV.get(key, 'arrayBuffer');
+		const candleData = await env.KV.get(key, 'text');
 
 		if (!candleData) {
 			return new Response(JSON.stringify({
@@ -1217,7 +1217,7 @@ async function handleSingleCandle(request: Request, env: Env): Promise<Response>
 
 		return new Response(candleData, {
 			headers: {
-				'Content-Type': 'application/binary',
+				'Content-Type': 'application/base64',
 				'Access-Control-Allow-Origin': '*',
 				'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
 				'Access-Control-Allow-Headers': 'Content-Type',
