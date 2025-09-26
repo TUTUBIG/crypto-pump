@@ -1160,6 +1160,7 @@ async function handleCandleChart(request: Request, env: Env): Promise<Response> 
 		const yyyy = targetDate.getUTCFullYear();
 		const mm = String(targetDate.getUTCMonth() + 1).padStart(2, '0');
 		const dd = String(targetDate.getUTCDate()).padStart(2, '0');
+		// todo different time frame data
 		const dateStr = `${yyyy}-${mm}-${dd}`;
 
 		// Compose the key for this day's candle data
