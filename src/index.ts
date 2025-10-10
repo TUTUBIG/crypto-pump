@@ -1014,7 +1014,14 @@ export default {
 
 										const result = await listTokens(env.DB, page, pageSize, chainId);
 										return new Response(JSON.stringify(result), {
-												headers: { 'Content-Type': 'application/json' }
+												headers: {
+													'Content-Type': 'application/json',
+													'Access-Control-Allow-Origin': '*',
+													'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+													'Access-Control-Allow-Headers': 'Content-Type',
+													'Access-Control-Max-Age': '86400'
+												}
+
 										});
 								} catch (error) {
 										console.error('Error listing tokens:', error);
