@@ -331,7 +331,6 @@ async function updateTokenVolume(
     return result.success;
 }
 
-
 export class WebSocketGateway extends DurableObject<Env> {
 	private connections: Map<WebSocket, WebSocketConnection> = new Map();
 
@@ -742,7 +741,7 @@ export class WebSocketGateway extends DurableObject<Env> {
 }
 
 // Create Hono app with type-safe env
-const app = new Hono<{ Bindings: Env }>();
+const app = new Hono<{ Bindings: any }>();
 
 // Add CORS middleware
 app.use('*', cors({
@@ -1055,3 +1054,104 @@ export default {
 		}
 	},
 } satisfies ExportedHandler<Env>;
+
+/**
+ * Handle candle chart data using KV storage
+ */
+async function handleCandleChart(request: Request, env: Env): Promise<Response> {
+	try {
+		const url = new URL(request.url);
+		const tokenId = url.searchParams.get('token_id') || '';
+		const timeframe = url.searchParams.get('time_frame') || '60';
+		const page_index = url.searchParams.get('page') || '1';
+
+		if (tokenId.toString() == '') {
+			return new Response('Empty tokenId', { status: 400 });
+		}
+
+		// Calculate the date for the requested page
+		const page = parseInt(page_index, 10) || 1;
+		const now = new Date();
+		// Clone the date to avoid mutating 'now'
+		const targetDate = new Date(now);
+		targetDate.setUTCDate(now.getUTCDate() - (page - 1));
+
+		// Format date as YYYY-MM-DD
+		const yyyy = targetDate.getUTCFullYear();
+		const mm = String(targetDate.getUTCMonth() + 1).padStart(2, '0');
+		const dd = String(targetDate.getUTCDate()).padStart(2, '0');
+		// todo different time frame data
+		const dateStr = `${yyyy}-${mm}-${dd}`;
+
+		// Compose the key for this day's candle data
+		const key = `${tokenId}-${timeframe}-${dateStr}`;
+
+		// Retrieve candle data for this day from KV
+		const candleData = await env.KV.get(key, 'text');
+
+		return new Response(candleData, {
+			headers: {
+				'Content-Type': 'application/base64',
+				'Access-Control-Allow-Origin': '*',
+				'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+				'Access-Control-Allow-Headers': 'Content-Type',
+				'Access-Control-Max-Age': '86400'
+			}
+		});
+	} catch (error) {
+		return new Response(JSON.stringify({
+			success: false,
+			error: error instanceof Error ? error.message : 'Unknown error'
+		}), {
+			status: 500,
+			headers: { 'Content-Type': 'application/json' }
+		});
+	}
+}
+
+/**
+ * Handle single candle data retrieval from KV
+ */
+async function handleSingleCandle(request: Request, env: Env): Promise<Response> {
+	try {
+		const url = new URL(request.url);
+		const tokenId = url.searchParams.get('token_id') || '';
+		const timeframe = url.searchParams.get('timeframe') || '60';
+
+		if (tokenId.toString() == '') {
+			return new Response('Empty token_id', { status: 400 });
+		}
+
+		// Compose the key for this day's candle data
+		const key = `${tokenId}-${timeframe}-current`;
+
+		// Retrieve candle data for this day from KV
+		const candleData = await env.KV.get(key, 'text');
+
+		if (!candleData) {
+			return new Response(JSON.stringify({
+				success: false,
+				error: 'data not found'
+			}))
+		}
+
+
+		return new Response(candleData, {
+			headers: {
+				'Content-Type': 'application/base64',
+				'Access-Control-Allow-Origin': '*',
+				'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+				'Access-Control-Allow-Headers': 'Content-Type',
+				'Access-Control-Max-Age': '86400'
+			}
+		});
+	} catch (error) {
+		return new Response(JSON.stringify({
+			success: false,
+			error: error instanceof Error ? error.message : 'Unknown error'
+		}), {
+			status: 500,
+			headers: { 'Content-Type': 'application/json' }
+		});
+	}
+}
