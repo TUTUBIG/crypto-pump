@@ -48,7 +48,7 @@ interface WebSocketConnection {
 	id: string;
 	createdAt: number;
 	lastHeartbeat: number;
-	subscribedPools: Set<string>; // Track which token this connection is subscribed to
+	tokenId: string;
 }
 
 // Database helper functions
@@ -364,7 +364,7 @@ export class WebSocketGateway extends DurableObject<Env> {
 			id: connectionId,
 			createdAt: now,
 			lastHeartbeat: now,
-			subscribedPools: new Set<string>()
+			tokenId: ""
 		}
 		this.connections.set(pair[1], connection);
 
@@ -440,15 +440,13 @@ export class WebSocketGateway extends DurableObject<Env> {
 				} else if (data.action === 'subscribe') {
 					// Handle token subscription
 					if (data.token_id) {
-						connection.subscribedPools.add(data.token_id);
+						connection.tokenId = data.token_id;
 						ws.serializeAttachment(connection)
 
 						console.log(`📋 ${connection.id} subscribed to token: ${data.token_id}`);
 
 						const response = JSON.stringify({
 							action: 'subscribed',
-							subscribe_id: data.token_id,
-							subscribedPools: Array.from(connection.subscribedPools),
 							timestamp: Date.now()
 						});
 						ws.send(response);
@@ -456,14 +454,13 @@ export class WebSocketGateway extends DurableObject<Env> {
 				} else if (data.action === 'unsubscribe') {
 					// Handle token unsubscription
 					if (data.token_id) {
-						connection.subscribedPools.delete(data.token_id);
+						connection.tokenId = ""
 						ws.serializeAttachment(connection)
 						console.log(`📋 ${connection.id} unsubscribed from pool: ${data.token_id}`);
 
 						const response = JSON.stringify({
 							action: 'unsubscribed',
 							status: 'success',
-							subscribedPools: Array.from(connection.subscribedPools),
 							timestamp: Date.now()
 						});
 						ws.send(response);
@@ -566,82 +563,14 @@ export class WebSocketGateway extends DurableObject<Env> {
 				createdAt: new Date(conn.createdAt).toISOString(),
 				lastHeartbeat: new Date(conn.lastHeartbeat).toISOString(),
 				ageSeconds: Math.floor((now - conn.createdAt) / 1000),
-				subscribedPools: Array.from(conn.subscribedPools)
 			}))
 		};
 	}
 
 	/**
-	 * Broadcast data to all WebSocket connections
-	 */
-	async publishData(data: any, targetPoolId?: string): Promise<{ success: boolean; connectionsNotified: number }> {
-		console.log(`Publishing data to WebSocket connections${targetPoolId ? ` for pool: ${targetPoolId}` : ''}`);
-
-		try {
-			if (this.connections.size === 0) {
-				console.log('No WebSocket connections to broadcast to');
-				return { success: true, connectionsNotified: 0 };
-			}
-
-							// Format data as JSON message (without custom type to avoid browser warnings)
-		const message = JSON.stringify({
-			data: data,
-			poolId: targetPoolId,
-			timestamp: Date.now()
-		});
-
-		// Iterate through connections and filter in the loop
-		const broadcastTasks: Promise<boolean>[] = [];
-		let targetCount = 0;
-
-		for (const [ws, connection] of this.connections) {
-			// Filter logic in the loop
-			if (targetPoolId && !connection.subscribedPools.has(targetPoolId)) {
-				continue; // Skip this connection
-			}
-
-			// Add to broadcast tasks
-			broadcastTasks.push(this.sendToConnection(ws, connection, message));
-			targetCount++;
-		}
-
-		if (targetCount === 0) {
-			console.log('No subscribed connections to broadcast to');
-			return { success: true, connectionsNotified: 0 };
-		}
-
-		console.log(`📋 Broadcasting to ${targetCount} connections${targetPoolId ? ` subscribed to token: ${targetPoolId}` : ''}`);
-
-					// Wait for all broadcasts to complete
-		const results = await Promise.allSettled(broadcastTasks);
-
-		// Count successful sends
-		const successCount = results.filter(r => r.status === 'fulfilled' && r.value).length;
-		const failedCount = results.length - successCount;
-
-		if (failedCount > 0) {
-			console.log(`🧹 Cleaned up ${failedCount} failed WebSocket connections`);
-		}
-
-		console.log(`WebSocket broadcast completed: ${successCount}/${targetCount} connections notified`);
-
-		return {
-			success: true,
-			connectionsNotified: successCount
-		};
-		} catch (error) {
-			console.error('Error during WebSocket broadcast:', error);
-			return {
-				success: false,
-				connectionsNotified: 0
-			};
-		}
-	}
-
-	/**
 	 * Broadcast binary data to all WebSocket connections
 	 */
-	async publishBinaryData(binaryData: ArrayBuffer | Uint8Array, targetTokenId?: string): Promise<{ success: boolean; connectionsNotified: number }> {
+	async publishBinaryData(binaryData: ArrayBuffer | Uint8Array, targetTokenId: string): Promise<{ success: boolean; connectionsNotified: number }> {
 		console.log(`Publishing binary data to WebSocket connections${targetTokenId ? ` for token: ${targetTokenId}` : ''}, size:`, binaryData.byteLength);
 		try {
 			if (this.connections.size === 0) {
@@ -658,8 +587,7 @@ export class WebSocketGateway extends DurableObject<Env> {
 
 			for (const [ws, connection] of this.connections) {
 				// Filter logic in the loop
-				if (targetTokenId && !connection.subscribedPools.has(targetTokenId)) {
-					console.log(targetTokenId,connection.subscribedPools)
+				if (connection.tokenId != targetTokenId) {
 					continue; // Skip this connection
 				}
 
@@ -719,8 +647,8 @@ export class WebSocketGateway extends DurableObject<Env> {
 					}
 					const binaryData = await request.arrayBuffer();
 					const binaryTargetTokenId = request.headers.get('Customized-Token-ID')!
-					const binaryResult = await this.publishBinaryData(binaryData, binaryTargetTokenId);
-					return new Response(JSON.stringify(binaryResult), {
+					const result = await this.publishBinaryData(binaryData, binaryTargetTokenId);
+					return new Response(JSON.stringify(result), {
 						headers: { 'Content-Type': 'application/json' }
 					});
 
@@ -1069,33 +997,49 @@ async function handleCandleChart(request: Request, env: Env): Promise<Response> 
 			return new Response('Empty tokenId', { status: 400 });
 		}
 
-		// Calculate the date for the requested page
 		const page = parseInt(page_index, 10) || 1;
-		const now = new Date();
-		// Clone the date to avoid mutating 'now'
-		const targetDate = new Date(now);
-		targetDate.setUTCDate(now.getUTCDate() - (page - 1));
+		const maxDaysToSearch = 30; // Search up to 30 days back
 
-		// Format date as YYYY-MM-DD
-		const yyyy = targetDate.getUTCFullYear();
-		const mm = String(targetDate.getUTCMonth() + 1).padStart(2, '0');
-		const dd = String(targetDate.getUTCDate()).padStart(2, '0');
-		// todo different time frame data
-		const dateStr = `${yyyy}-${mm}-${dd}`;
+		// Try to find data starting from the requested page (days back)
+		let candleData: string | null = null;
+		let foundDate: string | null = null;
 
-		// Compose the key for this day's candle data
-		const key = `${tokenId}-${timeframe}-${dateStr}`;
+		for (let i = page - 1; i < maxDaysToSearch; i++) {
+			const now = new Date();
+			const targetDate = new Date(now);
+			targetDate.setUTCDate(now.getUTCDate() - i);
 
-		// Retrieve candle data for this day from KV
-		const candleData = await env.KV.get(key, 'text');
+			// Format date as YYYY-MM-DD
+			const yyyy = targetDate.getUTCFullYear();
+			const mm = String(targetDate.getUTCMonth() + 1).padStart(2, '0');
+			const dd = String(targetDate.getUTCDate()).padStart(2, '0');
+			const dateStr = `${yyyy}-${mm}-${dd}`;
+
+			// Compose the key for this day's candle data
+			const key = `${tokenId}-${timeframe}-${dateStr}`;
+
+			// Try to retrieve candle data for this day from KV
+			candleData = await env.KV.get(key, 'text');
+
+			if (candleData) {
+				foundDate = dateStr;
+				break;
+			}
+		}
+
+		if (!candleData) {
+			return new Response(JSON.stringify({
+				success: false,
+				error: 'No candle data found for the requested period'
+			}), {
+				status: 404,
+				headers: { 'Content-Type': 'application/json' }
+			});
+		}
 
 		return new Response(candleData, {
 			headers: {
 				'Content-Type': 'application/base64',
-				'Access-Control-Allow-Origin': '*',
-				'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-				'Access-Control-Allow-Headers': 'Content-Type',
-				'Access-Control-Max-Age': '86400'
 			}
 		});
 	} catch (error) {
@@ -1116,7 +1060,7 @@ async function handleSingleCandle(request: Request, env: Env): Promise<Response>
 	try {
 		const url = new URL(request.url);
 		const tokenId = url.searchParams.get('token_id') || '';
-		const timeframe = url.searchParams.get('timeframe') || '60';
+		const timeframe = url.searchParams.get('time_frame') || '60';
 
 		if (tokenId.toString() == '') {
 			return new Response('Empty token_id', { status: 400 });
