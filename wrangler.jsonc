@@ -13,6 +13,18 @@
 				"WebSocketGateway"
 			],
 			"tag": "v1"
+		},
+		{
+			"new_sqlite_classes": [
+				"VerificationCodeStore"
+			],
+			"tag": "v2"
+		},
+		{
+			"new_sqlite_classes": [
+				"RefreshTokenStore"
+			],
+			"tag": "v3"
 		}
 	],
 	"durable_objects": {
@@ -20,6 +32,14 @@
 			{
 				"class_name": "WebSocketGateway",
 				"name": "TRADE_GATEWAY"
+			},
+			{
+				"class_name": "VerificationCodeStore",
+				"name": "VERIFICATION_STORE"
+			},
+			{
+				"class_name": "RefreshTokenStore",
+				"name": "REFRESH_TOKEN_STORE"
 			}
 		]
 	},
@@ -57,7 +77,12 @@
 	 * Environment Variables
 	 * https://developers.cloudflare.com/workers/wrangler/configuration/#environment-variables
 	 */
-	"vars": { "API_KEY": "api_key" }
+	 "vars": {
+		 "API_KEY": "secret",
+		 "EMAIL_API_KEY": "secret",
+		 "SENDER_EMAIL": "info@fipulse.xyz",
+		 "SENDER_NAME": "FiPulse"
+	 }
 	/**
 	 * Note: Use secrets to store sensitive data.
 	 * https://developers.cloudflare.com/workers/configuration/secrets/
