@@ -78,11 +78,8 @@
 	 * https://developers.cloudflare.com/workers/wrangler/configuration/#environment-variables
 	 */
 	 "vars": {
-		 "API_KEY": "secret",
-		 "EMAIL_API_KEY": "secret",
 		 "SENDER_EMAIL": "info@fipulse.xyz",
-		 "SENDER_NAME": "FiPulse",
-		 "TELEGRAM_BOT_TOKEN": "secret"
+		 "SENDER_NAME": "FiPulse"
 	 }
 	/**
 	 * Note: Use secrets to store sensitive data.
