@@ -8,6 +8,8 @@ declare namespace Cloudflare {
 		EMAIL_API_KEY: "secret";
 		SENDER_EMAIL: "info@fipulse.xyz";
 		SENDER_NAME: "FiPulse";
+		JWT_SECRET: string;
+		TELEGRAM_BOT_TOKEN: string;
 		TRADE_GATEWAY: DurableObjectNamespace<import("./src/index").WebSocketGateway>;
 		VERIFICATION_STORE: DurableObjectNamespace<import("./src/index").VerificationCodeStore>;
 		REFRESH_TOKEN_STORE: DurableObjectNamespace<import("./src/index").RefreshTokenStore>;

@@ -81,7 +81,8 @@
 		 "API_KEY": "secret",
 		 "EMAIL_API_KEY": "secret",
 		 "SENDER_EMAIL": "info@fipulse.xyz",
-		 "SENDER_NAME": "FiPulse"
+		 "SENDER_NAME": "FiPulse",
+		 "TELEGRAM_BOT_TOKEN": "secret"
 	 }
 	/**
 	 * Note: Use secrets to store sensitive data.

@@ -1,7 +1,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
-import { SignJWT, jwtVerify } from 'jose';
+import { jwtVerify, SignJWT } from 'jose';
 
 /**
  * WebSocket Gateway using Cloudflare Durable Objects + Pool Information Management
@@ -701,6 +701,90 @@ async function getActiveWatchedTokens(
     }));
 }
 
+// Telegram Authentication Utilities
+async function verifyTelegramAuth(authData: any, botToken: string): Promise<{ valid: boolean; error?: string }> {
+	try {
+		// 1. Validate required fields
+		if (!authData.hash) {
+			console.error('No hash provided in Telegram auth data');
+			return { valid: false, error: 'Missing hash' };
+		}
+
+		if (!authData.auth_date) {
+			console.error('No auth_date provided in Telegram auth data');
+			return { valid: false, error: 'Missing auth_date' };
+		}
+
+		// 2. Check if auth_date is out of date
+		const authDate = parseInt(authData.auth_date);
+		const now = Math.floor(Date.now() / 1000);
+		const maxAge = 60; // 1 minutes in seconds
+
+		if (isNaN(authDate)) {
+			console.error('Invalid auth_date format');
+			return { valid: false, error: 'Invalid auth_date' };
+		}
+
+		if (now - authDate > maxAge) {
+			console.error('Auth data expired:', { authDate, now, diff: now - authDate });
+			return { valid: false, error: 'Authentication data expired (older than 1 minutes)' };
+		}
+
+		// 3. Prepare data check string
+		// Extract hash and create data_check_string from remaining fields
+		const { hash, ...dataToCheck } = authData;
+
+		// Data-check-string: concatenation of all fields sorted alphabetically
+		// Format: key=<value>\nkey=<value> (line feed 0x0A as separator)
+		const dataCheckString = Object.keys(dataToCheck)
+			.sort()
+			.map(key => `${key}=${dataToCheck[key]}`)
+			.join('\n');
+
+		console.log('Data check string:', dataCheckString);
+
+		// 4. Calculate hash and verify
+		// Step 4.1: Compute secret_key = SHA256(bot_token)
+		const encoder = new TextEncoder();
+		const botTokenData = encoder.encode(botToken);
+		const secretKeyBuffer = await crypto.subtle.digest('SHA-256', botTokenData);
+
+		// Step 4.2: Compute HMAC-SHA256(data_check_string, secret_key)
+		const secretKey = await crypto.subtle.importKey(
+			'raw',
+			secretKeyBuffer,
+			{ name: 'HMAC', hash: 'SHA-256' },
+			false,
+			['sign']
+		);
+
+		const dataCheckStringData = encoder.encode(dataCheckString);
+		const signatureBuffer = await crypto.subtle.sign(
+			'HMAC',
+			secretKey,
+			dataCheckStringData
+		);
+
+		// Step 4.3: Convert to hex string
+		const signatureArray = Array.from(new Uint8Array(signatureBuffer));
+		const computedHash = signatureArray.map(b => b.toString(16).padStart(2, '0')).join('');
+
+		console.log('Computed hash:', computedHash);
+		console.log('Provided hash:', hash);
+
+		// Step 4.4: Compare computed hash with provided hash
+		if (computedHash !== hash) {
+			console.error('Hash mismatch - authentication failed');
+			return { valid: false, error: 'Invalid hash signature' };
+		}
+
+		return { valid: true };
+	} catch (error) {
+		console.error('Error verifying Telegram auth:', error);
+		return { valid: false, error: 'Verification failed' };
+	}
+}
+
 // JWT Utilities
 async function hashPassword(password: string): Promise<string> {
 	const encoder = new TextEncoder();
@@ -857,6 +941,42 @@ async function updateUserLastLogin(db: D1Database, userId: number): Promise<bool
 	return result.success;
 }
 
+async function bindTelegramToUser(
+	db: D1Database,
+	userId: number,
+	telegramId: string,
+	telegramUsername?: string
+): Promise<{ success: boolean; error?: string }> {
+	try {
+		// Check if Telegram ID is already linked to another account
+		const existingUser = await getUserByTelegramId(db, telegramId);
+		if (existingUser && existingUser.id !== userId) {
+			return {
+				success: false,
+				error: 'This Telegram account is already linked to another user'
+			};
+		}
+
+		// Update user with Telegram info
+		const result = await db.prepare(`
+			UPDATE users
+			SET telegram_id = ?,
+			    telegram_username = ?,
+			    updated_at = CURRENT_TIMESTAMP
+			WHERE id = ?
+		`).bind(telegramId, telegramUsername || null, userId).run();
+
+		if (!result.success) {
+			return { success: false, error: 'Failed to bind Telegram account' };
+		}
+
+		return { success: true };
+	} catch (error) {
+		console.error('Error binding Telegram to user:', error);
+		return { success: false, error: 'Database error' };
+	}
+}
+
 // Verification Code Functions using Durable Object
 async function createVerificationCodeDurable(
 	env: any,
@@ -916,8 +1036,7 @@ async function createRefreshTokenDurable(
 			body: JSON.stringify({ userId, email, telegram_id })
 		}));
 
-		const result = await response.json() as { success: boolean; token?: string; error?: string };
-		return result;
+		return await response.json() as { success: boolean; token?: string; error?: string };
 	} catch (error) {
 		console.error('Error creating refresh token:', error);
 		return { success: false, error: 'Failed to create refresh token' };
@@ -2253,17 +2372,100 @@ app.post('/auth/login', async (c) => {
 	}
 });
 
-// Telegram Login
+// Telegram Login/Bind
+// If called with valid JWT token: binds Telegram to existing account
+// If called without JWT token: login/register with Telegram
 app.post('/auth/telegram', async (c) => {
 	try {
-		const { telegram_id, telegram_username } = await c.req.json();
+		const authData = await c.req.json();
 
-		// Validate input
-		if (!telegram_id) {
+		// Validate required fields
+		if (!authData.id) {
 			return c.json({ error: 'Telegram ID is required' }, 400);
 		}
 
-		// Check if user exists
+		// Get bot token from environment
+		const botToken = c.env.TELEGRAM_BOT_TOKEN;
+		if (!botToken) {
+			console.error('TELEGRAM_BOT_TOKEN not configured');
+			return c.json({ error: 'Telegram authentication not configured' }, 500);
+		}
+
+		// Verify Telegram authentication (includes all 3 checks)
+		// 1. Data-check-string format: key=<value>\nkey=<value> (sorted alphabetically)
+		// 2. Check auth_date is not out of date
+		// 3. Calculate hash and verify it matches
+		const verification = await verifyTelegramAuth(authData, botToken);
+		if (!verification.valid) {
+			console.error('Telegram auth verification failed:', verification.error);
+			return c.json({ error: verification.error || 'Invalid Telegram authentication' }, 401);
+		}
+
+		const telegram_id = authData.id.toString();
+		const telegram_username = authData.username || authData.first_name || null;
+
+		// Check if user is already authenticated (has valid JWT token)
+		const authenticatedUser = await authenticateUser(c);
+
+		// CASE 1: User is authenticated - bind Telegram to their account
+		if (authenticatedUser) {
+			console.log('Binding Telegram to authenticated user:', authenticatedUser.id);
+
+			// Check if user already has Telegram linked
+			if (authenticatedUser.telegram_id) {
+				if (authenticatedUser.telegram_id === telegram_id) {
+					return c.json({
+						success: true,
+						message: 'Telegram account already linked to this account',
+						user: {
+							id: authenticatedUser.id,
+							email: authenticatedUser.email,
+							telegram_id: authenticatedUser.telegram_id,
+							telegram_username: authenticatedUser.telegram_username,
+						}
+					});
+				} else {
+					return c.json({
+						error: 'This account is already linked to a different Telegram account. Please unlink first.'
+					}, 400);
+				}
+			}
+
+			// Bind Telegram to current user
+			const bindResult = await bindTelegramToUser(
+				c.env.DB,
+				authenticatedUser.id,
+				telegram_id,
+				telegram_username
+			);
+
+			if (!bindResult.success) {
+				return c.json({ error: bindResult.error }, 400);
+			}
+
+			// Fetch updated user
+			const updatedUser = await c.env.DB.prepare(
+				'SELECT * FROM users WHERE id = ?'
+			).bind(authenticatedUser.id).first() as User;
+
+			return c.json({
+				success: true,
+				message: 'Telegram account successfully linked',
+				user: {
+					id: updatedUser.id,
+					email: updatedUser.email,
+					telegram_id: updatedUser.telegram_id,
+					telegram_username: updatedUser.telegram_username,
+					created_at: updatedUser.created_at,
+					updated_at: updatedUser.updated_at
+				}
+			});
+		}
+
+		// CASE 2: User is not authenticated - login/register with Telegram
+		console.log('Telegram login/register for:', telegram_id);
+
+		// Check if user exists with this Telegram ID
 		let user = await getUserByTelegramId(c.env.DB, telegram_id);
 
 		if (!user) {
@@ -2311,6 +2513,7 @@ app.post('/auth/telegram', async (c) => {
 			expires_in: 1800, // 30 minutes in seconds
 			user: {
 				id: user.id,
+				email: user.email,
 				telegram_id: user.telegram_id,
 				telegram_username: user.telegram_username,
 				created_at: user.created_at,
@@ -2320,6 +2523,42 @@ app.post('/auth/telegram', async (c) => {
 	} catch (error) {
 		console.error('Error with Telegram login:', error);
 		return c.json({ error: 'Failed to login with Telegram' }, 500);
+	}
+});
+
+// Unbind Telegram from account (requires authentication)
+app.delete('/auth/telegram', async (c) => {
+	try {
+		const user = await authenticateUser(c);
+		if (!user) {
+			return c.json({ error: 'Unauthorized' }, 401);
+		}
+
+		// Check if user has Telegram linked
+		if (!user.telegram_id) {
+			return c.json({ error: 'No Telegram account linked' }, 400);
+		}
+
+		// Remove Telegram info from user
+		const result = await c.env.DB.prepare(`
+			UPDATE users
+			SET telegram_id = NULL,
+			    telegram_username = NULL,
+			    updated_at = CURRENT_TIMESTAMP
+			WHERE id = ?
+		`).bind(user.id).run();
+
+		if (!result.success) {
+			return c.json({ error: 'Failed to unbind Telegram account' }, 500);
+		}
+
+		return c.json({
+			success: true,
+			message: 'Telegram account successfully unlinked'
+		});
+	} catch (error) {
+		console.error('Error unbinding Telegram:', error);
+		return c.json({ error: 'Failed to unbind Telegram' }, 500);
 	}
 });
 
