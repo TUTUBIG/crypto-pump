@@ -2580,6 +2580,11 @@ app.post('/auth/register', async (c) => {
 			console.error('Failed to create refresh token:', refreshResult.error);
 		}
 
+		// Fetch the newly created user to get all fields
+		const newUser = await c.env.DB.prepare(
+			'SELECT * FROM users WHERE id = ?'
+		).bind(result.userId).first() as User;
+
 		return c.json({
 			success: true,
 			access_token: accessToken,
@@ -2587,8 +2592,16 @@ app.post('/auth/register', async (c) => {
 			token_type: 'Bearer',
 			expires_in: 1800, // 30 minutes in seconds
 			user: {
-				id: result.userId,
-				email
+				id: newUser.id,
+				email: newUser.email,
+				telegram_id: newUser.telegram_id,
+				telegram_username: newUser.telegram_username,
+				full_name: newUser.full_name,
+				avatar_url: newUser.avatar_url,
+				bot_started: newUser.bot_started,
+				bot_started_at: newUser.bot_started_at,
+				created_at: newUser.created_at,
+				last_login_at: newUser.last_login_at
 			}
 		}, 201);
 	} catch (error) {
@@ -2665,6 +2678,12 @@ app.post('/auth/login', async (c) => {
 			user: {
 				id: user.id,
 				email: user.email,
+				telegram_id: user.telegram_id,
+				telegram_username: user.telegram_username,
+				full_name: user.full_name,
+				avatar_url: user.avatar_url,
+				bot_started: user.bot_started,
+				bot_started_at: user.bot_started_at,
 				created_at: user.created_at,
 				last_login_at: user.last_login_at
 			}
@@ -2819,6 +2838,10 @@ app.post('/auth/telegram', async (c) => {
 				email: user.email,
 				telegram_id: user.telegram_id,
 				telegram_username: user.telegram_username,
+				full_name: user.full_name,
+				avatar_url: user.avatar_url,
+				bot_started: user.bot_started,
+				bot_started_at: user.bot_started_at,
 				created_at: user.created_at,
 				last_login_at: user.last_login_at
 			}
@@ -3083,6 +3106,81 @@ app.get('/auth/me', async (c) => {
 	} catch (error) {
 		console.error('Error getting user profile:', error);
 		return c.json({ error: 'Failed to get user profile' }, 500);
+	}
+});
+
+// Get user notification preferences
+app.get('/user/notification-preferences', async (c) => {
+	try {
+		const user = await authenticateUser(c);
+		if (!user) {
+			return c.json({ error: 'Unauthorized' }, 401);
+		}
+
+		// Fetch notification preferences from database
+		const preferences = await c.env.DB.prepare('SELECT email_enabled, telegram_enabled FROM notification_preferences WHERE user_id = ?').bind(user.id).first<{ email_enabled: number; telegram_enabled: number }>();
+
+		// If no preferences found, return defaults
+		if (!preferences) {
+			return c.json({
+				email_enabled: true,
+				telegram_enabled: false
+			});
+		}
+
+		// D1 returns booleans as integers (0 or 1), convert to boolean
+		return c.json({
+			email_enabled: preferences.email_enabled === 1,
+			telegram_enabled: preferences.telegram_enabled === 1
+		});
+	} catch (error) {
+		console.error('Error getting notification preferences:', error);
+		return c.json({ error: 'Failed to get notification preferences' }, 500);
+	}
+});
+
+// Update user notification preferences
+app.put('/user/notification-preferences', async (c) => {
+	try {
+		const user = await authenticateUser(c);
+		if (!user) {
+			return c.json({ error: 'Unauthorized' }, 401);
+		}
+
+		const body = await c.req.json<{ email_enabled?: boolean; telegram_enabled?: boolean }>();
+
+		// Validate request body
+		if (typeof body.email_enabled !== 'boolean' && typeof body.telegram_enabled !== 'boolean') {
+			return c.json({ error: 'At least one preference must be provided' }, 400);
+		}
+
+		// Get current preferences or defaults
+		const current = await c.env.DB.prepare('SELECT email_enabled, telegram_enabled FROM notification_preferences WHERE user_id = ?').bind(user.id).first<{ email_enabled: number; telegram_enabled: number }>();
+
+		const emailEnabled = typeof body.email_enabled === 'boolean'
+			? body.email_enabled
+			: (current?.email_enabled === 1 ? true : current?.email_enabled === 0 ? false : true);
+		const telegramEnabled = typeof body.telegram_enabled === 'boolean'
+			? body.telegram_enabled
+			: (current?.telegram_enabled === 1 ? true : current?.telegram_enabled === 0 ? false : false);
+
+		// Upsert notification preferences
+		await c.env.DB.prepare(`
+			INSERT INTO notification_preferences (user_id, email_enabled, telegram_enabled, created_at, updated_at)
+			VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+			ON CONFLICT(user_id) DO UPDATE SET
+				email_enabled = excluded.email_enabled,
+				telegram_enabled = excluded.telegram_enabled,
+				updated_at = CURRENT_TIMESTAMP
+		`).bind(user.id, emailEnabled ? 1 : 0, telegramEnabled ? 1 : 0).run();
+
+		return c.json({
+			email_enabled: emailEnabled,
+			telegram_enabled: telegramEnabled
+		});
+	} catch (error) {
+		console.error('Error updating notification preferences:', error);
+		return c.json({ error: 'Failed to update notification preferences' }, 500);
 	}
 });
 
@@ -3428,7 +3526,7 @@ app.get('/watched-tokens/active/all', async (c) => {
 app.post('/webhook/bot', async (c) => {
 	try {
 		const requestBody = await c.req.json();
-		
+
 		// Log all headers for debugging
 		const allHeaders: Record<string, string> = {};
 		c.req.raw.headers.forEach((value, key) => {
@@ -3439,7 +3537,7 @@ app.post('/webhook/bot', async (c) => {
 				allHeaders[key] = value;
 			}
 		});
-		
+
 		console.log('[WEBHOOK /bot] Request received:', {
 			timestamp: new Date().toISOString(),
 			body: requestBody,
@@ -3464,16 +3562,16 @@ app.post('/webhook/bot', async (c) => {
 		// Check if it's a Telegram webhook format: { message: { from: { id }, text: "/start user_id" } }
 		if (requestBody.message) {
 			const message = requestBody.message;
-			
+
 			// Extract telegram data from message.from
 			if (message.from && message.from.id) {
 				telegram_id = message.from.id.toString();
 				telegram_username = message.from.username;
 				telegram_first_name = message.from.first_name;
-				console.log('[WEBHOOK /bot] Extracted from message.from:', { 
-					telegram_id, 
-					telegram_username, 
-					telegram_first_name 
+				console.log('[WEBHOOK /bot] Extracted from message.from:', {
+					telegram_id,
+					telegram_username,
+					telegram_first_name
 				});
 			}
 
@@ -3559,16 +3657,16 @@ app.post('/webhook/bot', async (c) => {
 				},
 				timestamp: new Date().toISOString()
 			};
-			
+
 			const publishRequest = new Request('http://localhost/publish-json', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify(wsEvent)
 			});
-			
+
 			const publishResponse = await gateway.fetch(publishRequest);
 			const publishResult = await publishResponse.json() as { success: boolean; connectionsNotified: number };
-			
+
 			console.log('[WEBHOOK /bot] Published bot_started event to WebSocket:', {
 				success: publishResult.success,
 				connectionsNotified: publishResult.connectionsNotified
@@ -3588,6 +3686,391 @@ app.post('/webhook/bot', async (c) => {
 	}
 });
 
+// ============== Database API Routes (for internal ORM) ==============
+
+// Helper function to authenticate internal API requests
+async function authenticateInternalAPI(c: any): Promise<boolean> {
+	const apiKey = c.req.header('X-API-Key');
+	const expectedKey = c.env.API_KEY || 'change-this-in-production';
+	return apiKey === expectedKey;
+}
+
+// POST /db/query - Execute SQL query (for ORM)
+interface SQLQueryRequest {
+	sql: string;
+	params?: any[];
+}
+
+app.post('/db/query', async (c) => {
+	try {
+		if (!(await authenticateInternalAPI(c))) {
+			return c.json({ error: 'Unauthorized' }, 401);
+		}
+
+		const body: SQLQueryRequest = await c.req.json();
+
+		if (!body.sql || typeof body.sql !== 'string') {
+			return c.json({ error: 'SQL query is required' }, 400);
+		}
+
+		// Validate SQL - only allow SELECT, INSERT, UPDATE, DELETE
+		const sqlUpper = body.sql.trim().toUpperCase();
+		const allowedOperations = ['SELECT', 'INSERT', 'UPDATE', 'DELETE'];
+		const isAllowed = allowedOperations.some(op => sqlUpper.startsWith(op));
+
+		if (!isAllowed) {
+			return c.json({ error: 'Only SELECT, INSERT, UPDATE, DELETE operations are allowed' }, 400);
+		}
+
+		// Execute query
+		const params = body.params || [];
+		let result;
+
+		if (sqlUpper.startsWith('SELECT')) {
+			// SELECT queries return results
+			const queryResult = await c.env.DB.prepare(body.sql).bind(...params).all();
+			result = {
+				success: true,
+				data: queryResult.results,
+				meta: queryResult.meta
+			};
+		} else {
+			// INSERT, UPDATE, DELETE queries return success status
+			const queryResult = await c.env.DB.prepare(body.sql).bind(...params).run();
+			result = {
+				success: queryResult.success,
+				meta: queryResult.meta
+			};
+		}
+
+		return c.json(result);
+	} catch (error: any) {
+		console.error('Error executing SQL query:', error);
+		return c.json({ 
+			error: 'Failed to execute SQL query',
+			message: error.message 
+		}, 500);
+	}
+});
+
+// POST /db/query/batch - Execute multiple SQL queries in a transaction
+interface SQLBatchRequest {
+	queries: Array<{
+		sql: string;
+		params?: any[];
+	}>;
+}
+
+app.post('/db/query/batch', async (c) => {
+	try {
+		if (!(await authenticateInternalAPI(c))) {
+			return c.json({ error: 'Unauthorized' }, 401);
+		}
+
+		const body: SQLBatchRequest = await c.req.json();
+
+		if (!body.queries || !Array.isArray(body.queries) || body.queries.length === 0) {
+			return c.json({ error: 'Queries array is required' }, 400);
+		}
+
+		// Validate all queries
+		for (const query of body.queries) {
+			if (!query.sql || typeof query.sql !== 'string') {
+				return c.json({ error: 'All queries must have SQL string' }, 400);
+			}
+
+			const sqlUpper = query.sql.trim().toUpperCase();
+			const allowedOperations = ['SELECT', 'INSERT', 'UPDATE', 'DELETE'];
+			const isAllowed = allowedOperations.some(op => sqlUpper.startsWith(op));
+
+			if (!isAllowed) {
+				return c.json({ error: `Query contains disallowed operation: ${query.sql.substring(0, 50)}` }, 400);
+			}
+		}
+
+		// Execute queries in a transaction-like manner (D1 doesn't support transactions in workers)
+		// We'll execute them sequentially and return results
+		const results = [];
+		for (const query of body.queries) {
+			const params = query.params || [];
+			const sqlUpper = query.sql.trim().toUpperCase();
+
+			try {
+				if (sqlUpper.startsWith('SELECT')) {
+					const queryResult = await c.env.DB.prepare(query.sql).bind(...params).all();
+					results.push({
+						success: true,
+						data: queryResult.results,
+						meta: queryResult.meta
+					});
+				} else {
+					const queryResult = await c.env.DB.prepare(query.sql).bind(...params).run();
+					results.push({
+						success: queryResult.success,
+						meta: queryResult.meta
+					});
+				}
+			} catch (error: any) {
+				results.push({
+					success: false,
+					error: error.message
+				});
+			}
+		}
+
+		return c.json({
+			success: true,
+			results: results
+		});
+	} catch (error: any) {
+		console.error('Error executing batch SQL queries:', error);
+		return c.json({ 
+			error: 'Failed to execute batch SQL queries',
+			message: error.message 
+		}, 500);
+	}
+});
+
+// GET /db/watched-tokens/active - Get all active watched tokens (for alert system)
+app.get('/db/watched-tokens/active', async (c) => {
+	try {
+		if (!(await authenticateInternalAPI(c))) {
+			return c.json({ error: 'Unauthorized' }, 401);
+		}
+
+		const activeWatchedTokens = await getActiveWatchedTokens(c.env.DB);
+
+		return c.json({
+			success: true,
+			data: activeWatchedTokens,
+			count: activeWatchedTokens.length
+		});
+	} catch (error) {
+		console.error('Error getting active watched tokens:', error);
+		return c.json({ error: 'Failed to get active watched tokens' }, 500);
+	}
+});
+
+// GET /db/watched-tokens/:tokenId - Get watched tokens by token ID
+app.get('/db/watched-tokens/token/:tokenId', async (c) => {
+	try {
+		if (!(await authenticateInternalAPI(c))) {
+			return c.json({ error: 'Unauthorized' }, 401);
+		}
+
+		const tokenId = parseInt(c.req.param('tokenId'));
+		if (isNaN(tokenId)) {
+			return c.json({ error: 'Invalid token ID' }, 400);
+		}
+
+		const query = `
+			SELECT
+				wt.id,
+				wt.user_id,
+				wt.token_id,
+				wt.notes,
+				wt.interval_1m,
+				wt.interval_5m,
+				wt.interval_15m,
+				wt.interval_1h,
+				wt.alert_active,
+				wt.created_at,
+				t.chain_id,
+				t.token_address,
+				t.token_symbol,
+				t.token_name,
+				t.decimals,
+				t.icon_url
+			FROM user_watched_tokens wt
+			INNER JOIN tokens t ON wt.token_id = t.id
+			WHERE wt.token_id = ? AND wt.alert_active = 1
+			ORDER BY wt.created_at DESC
+		`;
+
+		const result = await c.env.DB.prepare(query).bind(tokenId).all();
+
+		const watchedTokens = result.results.map((row: any) => ({
+			id: Number(row.id),
+			user_id: Number(row.user_id),
+			token_id: Number(row.token_id),
+			notes: row.notes ? String(row.notes) : undefined,
+			interval_1m: row.interval_1m ? Number(row.interval_1m) : undefined,
+			interval_5m: row.interval_5m ? Number(row.interval_5m) : undefined,
+			interval_15m: row.interval_15m ? Number(row.interval_15m) : undefined,
+			interval_1h: row.interval_1h ? Number(row.interval_1h) : undefined,
+			alert_active: Boolean(row.alert_active),
+			created_at: String(row.created_at),
+			chain_id: String(row.chain_id),
+			token_address: String(row.token_address),
+			token_symbol: String(row.token_symbol),
+			token_name: String(row.token_name),
+			decimals: Number(row.decimals),
+			icon_url: row.icon_url ? String(row.icon_url) : undefined
+		}));
+
+		return c.json({
+			success: true,
+			data: watchedTokens,
+			count: watchedTokens.length
+		});
+	} catch (error) {
+		console.error('Error getting watched tokens by token ID:', error);
+		return c.json({ error: 'Failed to get watched tokens' }, 500);
+	}
+});
+
+// GET /db/users/:userId - Get user by ID
+app.get('/db/users/:userId', async (c) => {
+	try {
+		if (!(await authenticateInternalAPI(c))) {
+			return c.json({ error: 'Unauthorized' }, 401);
+		}
+
+		const userId = parseInt(c.req.param('userId'));
+		if (isNaN(userId)) {
+			return c.json({ error: 'Invalid user ID' }, 400);
+		}
+
+		const result = await c.env.DB.prepare(
+			'SELECT * FROM users WHERE id = ?'
+		).bind(userId).first();
+
+		if (!result) {
+			return c.json({ error: 'User not found' }, 404);
+		}
+
+		return c.json({
+			success: true,
+			data: result
+		});
+	} catch (error) {
+		console.error('Error getting user:', error);
+		return c.json({ error: 'Failed to get user' }, 500);
+	}
+});
+
+// GET /db/users/telegram/:telegramId - Get user by Telegram ID
+app.get('/db/users/telegram/:telegramId', async (c) => {
+	try {
+		if (!(await authenticateInternalAPI(c))) {
+			return c.json({ error: 'Unauthorized' }, 401);
+		}
+
+		const telegramId = c.req.param('telegramId');
+
+		const result = await c.env.DB.prepare(
+			'SELECT * FROM users WHERE telegram_id = ?'
+		).bind(telegramId).first();
+
+		if (!result) {
+			return c.json({ error: 'User not found' }, 404);
+		}
+
+		return c.json({
+			success: true,
+			data: result
+		});
+	} catch (error) {
+		console.error('Error getting user by Telegram ID:', error);
+		return c.json({ error: 'Failed to get user' }, 500);
+	}
+});
+
+// GET /db/users/:userId/notification-preferences - Get notification preferences for user
+app.get('/db/users/:userId/notification-preferences', async (c) => {
+	try {
+		if (!(await authenticateInternalAPI(c))) {
+			return c.json({ error: 'Unauthorized' }, 401);
+		}
+
+		const userId = parseInt(c.req.param('userId'));
+		if (isNaN(userId)) {
+			return c.json({ error: 'Invalid user ID' }, 400);
+		}
+
+		const result = await c.env.DB.prepare(
+			'SELECT * FROM notification_preferences WHERE user_id = ?'
+		).bind(userId).first();
+
+		if (!result) {
+			// Return defaults if not found
+			return c.json({
+				success: true,
+				data: {
+					user_id: userId,
+					email_enabled: true,
+					telegram_enabled: false
+				}
+			});
+		}
+
+		return c.json({
+			success: true,
+			data: result
+		});
+	} catch (error) {
+		console.error('Error getting notification preferences:', error);
+		return c.json({ error: 'Failed to get notification preferences' }, 500);
+	}
+});
+
+// GET /db/tokens/:chainId/:tokenAddress - Get token by chain ID and address
+app.get('/db/tokens/:chainId/:tokenAddress', async (c) => {
+	try {
+		if (!(await authenticateInternalAPI(c))) {
+			return c.json({ error: 'Unauthorized' }, 401);
+		}
+
+		const chainId = c.req.param('chainId');
+		const tokenAddress = c.req.param('tokenAddress');
+
+		const result = await c.env.DB.prepare(
+			'SELECT * FROM tokens WHERE chain_id = ? AND token_address = ?'
+		).bind(chainId, tokenAddress).first();
+
+		if (!result) {
+			return c.json({ error: 'Token not found' }, 404);
+		}
+
+		return c.json({
+			success: true,
+			data: result
+		});
+	} catch (error) {
+		console.error('Error getting token:', error);
+		return c.json({ error: 'Failed to get token' }, 500);
+	}
+});
+
+// GET /db/tokens/id/:tokenId - Get token by ID
+app.get('/db/tokens/id/:tokenId', async (c) => {
+	try {
+		if (!(await authenticateInternalAPI(c))) {
+			return c.json({ error: 'Unauthorized' }, 401);
+		}
+
+		const tokenId = parseInt(c.req.param('tokenId'));
+		if (isNaN(tokenId)) {
+			return c.json({ error: 'Invalid token ID' }, 400);
+		}
+
+		const result = await c.env.DB.prepare(
+			'SELECT * FROM tokens WHERE id = ?'
+		).bind(tokenId).first();
+
+		if (!result) {
+			return c.json({ error: 'Token not found' }, 404);
+		}
+
+		return c.json({
+			success: true,
+			data: result
+		});
+	} catch (error) {
+		console.error('Error getting token by ID:', error);
+		return c.json({ error: 'Failed to get token' }, 500);
+	}
+});
 
 // Root/health check route
 app.get('/', async (c) => {

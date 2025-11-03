@@ -26,6 +26,20 @@ CREATE INDEX IF NOT EXISTS idx_users_google_id ON users(google_id);
 CREATE INDEX IF NOT EXISTS idx_users_apple_id ON users(apple_id);
 CREATE INDEX IF NOT EXISTS idx_users_x_id ON users(x_id);
 
+-- Table for user notification preferences
+CREATE TABLE IF NOT EXISTS notification_preferences (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL UNIQUE,
+    email_enabled BOOLEAN NOT NULL DEFAULT 1,
+    telegram_enabled BOOLEAN NOT NULL DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+-- Create index for notification preferences
+CREATE INDEX IF NOT EXISTS idx_notification_preferences_user_id ON notification_preferences(user_id);
+
 -- Table for email verification codes
 CREATE TABLE IF NOT EXISTS verification_codes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
