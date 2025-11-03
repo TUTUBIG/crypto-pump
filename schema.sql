@@ -21,7 +21,7 @@ CREATE TABLE IF NOT EXISTS verification_codes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     email TEXT NOT NULL,
     code TEXT NOT NULL,
-    purpose TEXT NOT NULL, -- 'register' or 'login'
+    purpose TEXT NOT NULL, -- 'register', 'login', or 'reset-password'
     expires_at TIMESTAMP NOT NULL,
     used BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -51,6 +51,23 @@ CREATE TABLE IF NOT EXISTS tokens (
 CREATE INDEX IF NOT EXISTS idx_token_chain_address ON tokens(chain_id, token_address);
 CREATE INDEX IF NOT EXISTS idx_token_symbol ON tokens(token_symbol);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_token_unique ON tokens(chain_id, token_address);
+
+-- Table for token tags
+CREATE TABLE IF NOT EXISTS token_tags (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    token_id INTEGER NOT NULL,
+    tag TEXT NOT NULL, -- Tag name (e.g., 'trending', 'new', 'popular')
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (token_id) REFERENCES tokens(id) ON DELETE CASCADE
+);
+
+-- Create indexes for efficient querying
+CREATE INDEX IF NOT EXISTS idx_token_tags_token_id ON token_tags(token_id);
+CREATE INDEX IF NOT EXISTS idx_token_tags_tag ON token_tags(tag);
+CREATE INDEX IF NOT EXISTS idx_token_tags_created_at ON token_tags(created_at);
+
+-- Ensure a token can only have one instance of each tag
+CREATE UNIQUE INDEX IF NOT EXISTS idx_token_tags_unique ON token_tags(token_id, tag);
 
 -- Table for user watched tokens (watchlist)
 CREATE TABLE IF NOT EXISTS user_watched_tokens (

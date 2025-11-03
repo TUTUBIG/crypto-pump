@@ -289,14 +289,14 @@ async function getToken(
     }
 
     return {
-			chain_id: result.chain_id,
-			daily_volume_usd: result.daily_volume_usd,
-			decimals: result.decimals,
-			icon_url: result.icon_url,
-			token_address: result.token_address,
-			token_name: result.token_name,
-			token_symbol: result.token_symbol,
-		};
+		chain_id: result.chain_id,
+		daily_volume_usd: result.daily_volume_usd,
+		decimals: result.decimals,
+		icon_url: result.icon_url,
+		token_address: result.token_address,
+		token_name: result.token_name,
+		token_symbol: result.token_symbol,
+	};
 }
 
 async function listTokens(
@@ -374,6 +374,146 @@ async function deleteToken(
         'DELETE FROM tokens WHERE chain_id = ? AND token_address = ?'
     ).bind(chainId, tokenAddress).run();
     return result.success;
+}
+
+/**
+ * Add a tag to a token
+ * @param db - Database instance
+ * @param tokenId - Token ID
+ * @param tag - Tag name
+ */
+async function addTokenTag(db: D1Database, tokenId: number, tag: string): Promise<{ success: boolean; id?: number }> {
+    try {
+        const result = await db.prepare(`
+            INSERT INTO token_tags (token_id, tag) VALUES (?, ?)
+        `).bind(tokenId, tag).run();
+
+        return {
+            success: result.success,
+            id: result.success ? Number(result.meta.last_row_id) : undefined
+        };
+    } catch (error: any) {
+        // Handle unique constraint violation (tag already exists for this token)
+        if (error.message?.includes('UNIQUE constraint failed')) {
+            return { success: true }; // Already has this tag, treat as success
+        }
+        throw error;
+    }
+}
+
+/**
+ * Remove a tag from a token
+ * @param db - Database instance
+ * @param tokenId - Token ID
+ * @param tag - Tag name
+ */
+async function removeTokenTag(db: D1Database, tokenId: number, tag: string): Promise<boolean> {
+    const result = await db.prepare(
+        'DELETE FROM token_tags WHERE token_id = ? AND tag = ?'
+    ).bind(tokenId, tag).run();
+    return result.success;
+}
+
+/**
+ * Remove all tags from a token
+ * @param db - Database instance
+ * @param tokenId - Token ID
+ */
+async function removeAllTokenTags(db: D1Database, tokenId: number): Promise<boolean> {
+    const result = await db.prepare(
+        'DELETE FROM token_tags WHERE token_id = ?'
+    ).bind(tokenId).run();
+    return result.success;
+}
+
+/**
+ * Get all tags for a token
+ * @param db - Database instance
+ * @param tokenId - Token ID
+ */
+async function getTokenTags(db: D1Database, tokenId: number): Promise<string[]> {
+    const result = await db.prepare(
+        'SELECT tag FROM token_tags WHERE token_id = ? ORDER BY created_at DESC'
+    ).bind(tokenId).all();
+    
+    return result.results.map((row: any) => String(row.tag));
+}
+
+/**
+ * Get tokens by tag
+ * @param db - Database instance
+ * @param tag - Tag name
+ * @param limit - Number of tokens to return
+ * @param chainId - Optional chain ID filter
+ */
+async function getTokensByTag(
+    db: D1Database,
+    tag: string,
+    limit: number = 20,
+    chainId?: string
+): Promise<any[]> {
+    let whereClause = '';
+    const bindings: any[] = [tag];
+
+    if (chainId) {
+        whereClause = 'AND t.chain_id = ?';
+        bindings.push(chainId);
+    }
+
+    bindings.push(limit);
+
+    const query = `
+        SELECT
+            t.id,
+            t.chain_id,
+            t.token_address,
+            t.token_symbol,
+            t.token_name,
+            t.decimals,
+            t.icon_url,
+            t.daily_volume_usd,
+            t.volume_updated_at,
+            t.created_at,
+            t.updated_at,
+            tt.created_at as tagged_at
+        FROM token_tags tt
+        INNER JOIN tokens t ON tt.token_id = t.id
+        WHERE tt.tag = ?
+        ${whereClause}
+        ORDER BY tt.created_at DESC
+        LIMIT ?
+    `;
+
+    const result = await db.prepare(query).bind(...bindings).all();
+
+    return result.results.map((row: any) => ({
+        id: Number(row.id),
+        chain_id: String(row.chain_id),
+        token_address: String(row.token_address),
+        token_symbol: String(row.token_symbol),
+        token_name: String(row.token_name),
+        decimals: Number(row.decimals),
+        icon_url: row.icon_url ? String(row.icon_url) : undefined,
+        daily_volume_usd: row.daily_volume_usd ? Number(row.daily_volume_usd) : 0,
+        volume_updated_at: row.volume_updated_at ? String(row.volume_updated_at) : undefined,
+        created_at: String(row.created_at),
+        updated_at: String(row.updated_at),
+        tagged_at: String(row.tagged_at)
+    }));
+}
+
+/**
+ * Get token ID by chain_id and token_address
+ * @param db - Database instance
+ * @param chainId - Chain ID
+ * @param tokenAddress - Token address
+ */
+async function getTokenId(db: D1Database, chainId: string, tokenAddress: string): Promise<number | null> {
+    const result: any = await db.prepare(
+        'SELECT id FROM tokens WHERE chain_id = ? AND token_address = ? LIMIT 1'
+    ).bind(chainId, tokenAddress).first();
+    
+    return result ? Number(result.id) : null;
 }
 
 async function updateTokenVolume(
@@ -896,6 +1036,34 @@ async function getUserByEmail(db: D1Database, email: string): Promise<User | nul
 	return result as User | null;
 }
 
+async function updateUserPassword(
+	db: D1Database,
+	email: string,
+	newPassword: string
+): Promise<{ success: boolean; error?: string }> {
+	try {
+		const passwordHash = await hashPassword(newPassword);
+		const result = await db.prepare(`
+			UPDATE users
+			SET password_hash = ?, updated_at = CURRENT_TIMESTAMP
+			WHERE email = ?
+		`).bind(passwordHash, email).run();
+
+		if (!result.success) {
+			return { success: false, error: 'Failed to update password' };
+		}
+
+		if (result.meta.changes === 0) {
+			return { success: false, error: 'User not found' };
+		}
+
+		return { success: true };
+	} catch (error) {
+		console.error('Error updating password:', error);
+		return { success: false, error: 'Database error' };
+	}
+}
+
 async function createUserWithTelegram(
 	db: D1Database,
 	telegramId: string,
@@ -981,7 +1149,7 @@ async function bindTelegramToUser(
 async function createVerificationCodeDurable(
 	env: any,
 	email: string,
-	purpose: 'register' | 'login'
+	purpose: 'register' | 'login' | 'reset-password'
 ): Promise<{ success: boolean; code?: string; error?: string }> {
 	try {
 		const codeStore = env.VERIFICATION_STORE.get(env.VERIFICATION_STORE.idFromName("codes"));
@@ -1003,7 +1171,7 @@ async function verifyCodeDurable(
 	env: any,
 	email: string,
 	code: string,
-	purpose: 'register' | 'login'
+	purpose: 'register' | 'login' | 'reset-password'
 ): Promise<{ valid: boolean; error?: string }> {
 	try {
 		const codeStore = env.VERIFICATION_STORE.get(env.VERIFICATION_STORE.idFromName("codes"));
@@ -1099,7 +1267,11 @@ async function sendVerificationEmail(
 
 	try {
 		// Using Brevo (formerly Sendinblue) API
-		const subject = purpose === 'register' ? 'Verify Your Email' : 'Your Login Code';
+		const subject = purpose === 'register' 
+			? 'Verify Your Email' 
+			: purpose === 'reset-password' 
+				? 'Reset Your Password' 
+				: 'Your Login Code';
 		const htmlContent = `
 			<!DOCTYPE html>
 			<html>
@@ -2100,6 +2272,130 @@ app.get('/tokens', async (c) => {
 	}
 });
 
+// Get tokens by tag (e.g., trending)
+app.get('/tokens/tag/:tag', async (c) => {
+	try {
+		const tag = c.req.param('tag');
+		const limit = Math.min(parseInt(c.req.query('limit') || '20'), 100);
+		const chainId = c.req.query('chainId') || undefined;
+
+		if (!tag) {
+			return c.json({ error: 'Tag parameter is required' }, 400);
+		}
+
+		const tokens = await getTokensByTag(c.env.DB, tag, limit, chainId);
+
+		return c.json({
+			success: true,
+			data: tokens,
+			count: tokens.length,
+			tag,
+			chainId: chainId || 'all'
+		});
+	} catch (error) {
+		console.error('Error getting tokens by tag:', error);
+		return c.json({ error: 'Failed to get tokens by tag' }, 500);
+	}
+});
+
+// Add tag to token
+app.post('/tokens/:chainId/:tokenAddress/tags', async (c) => {
+	try {
+		const chainId = c.req.param('chainId');
+		const tokenAddress = c.req.param('tokenAddress');
+		const { tag } = await c.req.json();
+
+		if (!tag) {
+			return c.json({ error: 'Tag is required' }, 400);
+		}
+
+		// Get token ID
+		const tokenId = await getTokenId(c.env.DB, chainId, tokenAddress);
+		if (!tokenId) {
+			return c.json({ error: 'Token not found' }, 404);
+		}
+
+		// Add the tag
+		const result = await addTokenTag(c.env.DB, tokenId, tag);
+		
+		if (!result.success) {
+			return c.json({ error: 'Failed to add tag' }, 500);
+		}
+
+		// Get all tags for this token
+		const tags = await getTokenTags(c.env.DB, tokenId);
+
+		return c.json({
+			success: true,
+			message: `Tag '${tag}' added to token`,
+			tags
+		});
+	} catch (error) {
+		console.error('Error adding token tag:', error);
+		return c.json({ error: 'Failed to add token tag' }, 500);
+	}
+});
+
+// Remove tag from token
+app.delete('/tokens/:chainId/:tokenAddress/tags/:tag', async (c) => {
+	try {
+		const chainId = c.req.param('chainId');
+		const tokenAddress = c.req.param('tokenAddress');
+		const tag = c.req.param('tag');
+
+		// Get token ID
+		const tokenId = await getTokenId(c.env.DB, chainId, tokenAddress);
+		if (!tokenId) {
+			return c.json({ error: 'Token not found' }, 404);
+		}
+
+		// Remove the tag
+		const result = await removeTokenTag(c.env.DB, tokenId, tag);
+		
+		if (!result) {
+			return c.json({ error: 'Failed to remove tag' }, 500);
+		}
+
+		// Get remaining tags
+		const tags = await getTokenTags(c.env.DB, tokenId);
+
+		return c.json({
+			success: true,
+			message: `Tag '${tag}' removed from token`,
+			tags
+		});
+	} catch (error) {
+		console.error('Error removing token tag:', error);
+		return c.json({ error: 'Failed to remove token tag' }, 500);
+	}
+});
+
+// Get all tags for a token
+app.get('/tokens/:chainId/:tokenAddress/tags', async (c) => {
+	try {
+		const chainId = c.req.param('chainId');
+		const tokenAddress = c.req.param('tokenAddress');
+
+		// Get token ID
+		const tokenId = await getTokenId(c.env.DB, chainId, tokenAddress);
+		if (!tokenId) {
+			return c.json({ error: 'Token not found' }, 404);
+		}
+
+		// Get tags
+		const tags = await getTokenTags(c.env.DB, tokenId);
+
+		return c.json({
+			success: true,
+			data: tags,
+			count: tags.length
+		});
+	} catch (error) {
+		console.error('Error getting token tags:', error);
+		return c.json({ error: 'Failed to get token tags' }, 500);
+	}
+});
+
 app.post('/tokens', async (c) => {
 	try {
 		const tokenData: TokenInfo = await c.req.json();
@@ -2175,8 +2471,8 @@ app.post('/auth/send-code', async (c) => {
 		}
 
 		// Validate purpose
-		if (purpose !== 'register' && purpose !== 'login') {
-			return c.json({ error: 'Purpose must be "register" or "login"' }, 400);
+		if (purpose !== 'register' && purpose !== 'login' && purpose !== 'reset-password') {
+			return c.json({ error: 'Purpose must be "register", "login", or "reset-password"' }, 400);
 		}
 
 		// For registration, check if email already exists
@@ -2187,8 +2483,8 @@ app.post('/auth/send-code', async (c) => {
 			}
 		}
 
-		// For login, check if email exists
-		if (purpose === 'login') {
+		// For login and reset-password, check if email exists
+		if (purpose === 'login' || purpose === 'reset-password') {
 			const existingUser = await getUserByEmail(c.env.DB, email);
 			if (!existingUser) {
 				return c.json({ error: 'Email not registered' }, 400);
@@ -2573,8 +2869,8 @@ app.post('/auth/resend-code', async (c) => {
 		}
 
 		// Validate purpose
-		if (purpose !== 'register' && purpose !== 'login') {
-			return c.json({ error: 'Purpose must be "register" or "login"' }, 400);
+		if (purpose !== 'register' && purpose !== 'login' && purpose !== 'reset-password') {
+			return c.json({ error: 'Purpose must be "register", "login", or "reset-password"' }, 400);
 		}
 
 		// Create new verification code using Durable Object
@@ -2606,6 +2902,57 @@ app.post('/auth/resend-code', async (c) => {
 	} catch (error) {
 		console.error('Error resending verification code:', error);
 		return c.json({ error: 'Failed to resend verification code' }, 500);
+	}
+});
+
+// Reset Password with Verification Code
+app.post('/auth/reset-password', async (c) => {
+	try {
+		const { email, verification_code, new_password } = await c.req.json();
+
+		// Validate input
+		if (!email || !verification_code || !new_password) {
+			return c.json({ error: 'Email, verification code, and new password are required' }, 400);
+		}
+
+		// Validate email format
+		const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+		if (!emailRegex.test(email)) {
+			return c.json({ error: 'Invalid email format' }, 400);
+		}
+
+		// Validate password length
+		if (new_password.length < 6) {
+			return c.json({ error: 'Password must be at least 6 characters' }, 400);
+		}
+
+		// Verify the verification code using Durable Object
+		const verificationResult = await verifyCodeDurable(c.env, email, verification_code, 'reset-password');
+
+		if (!verificationResult.valid) {
+			return c.json({ error: verificationResult.error || 'Invalid verification code' }, 400);
+		}
+
+		// Check if user exists
+		const user = await getUserByEmail(c.env.DB, email);
+		if (!user) {
+			return c.json({ error: 'User not found' }, 404);
+		}
+
+		// Update user password
+		const updateResult = await updateUserPassword(c.env.DB, email, new_password);
+
+		if (!updateResult.success) {
+			return c.json({ error: updateResult.error || 'Failed to reset password' }, 500);
+		}
+
+		return c.json({
+			success: true,
+			message: 'Password reset successfully'
+		});
+	} catch (error) {
+		console.error('Error resetting password:', error);
+		return c.json({ error: 'Failed to reset password' }, 500);
 	}
 });
 
@@ -2981,6 +3328,7 @@ app.get('/', async (c) => {
 			'/auth/resend-code': 'POST - Resend verification code',
 			'/auth/register': 'POST - Register new user with email/password/verification_code',
 			'/auth/login': 'POST - Login with email and password OR verification_code',
+			'/auth/reset-password': 'POST - Reset password with email/verification_code/new_password',
 			'/auth/telegram': 'POST - Login/Register with Telegram',
 			'/auth/refresh': 'POST - Refresh access token using refresh token',
 			'/auth/logout': 'POST - Logout and revoke refresh token',
@@ -2997,10 +3345,13 @@ app.get('/', async (c) => {
 			'/pools/add': 'POST - Add new pool information',
 			'/pools/search': 'GET - Search pools by name (?q=query)',
 
-			// Tokens
-			'/tokens': 'GET - List tokens (?page=1&pageSize=20&chainId=1&search=name_or_address) | POST - Add new token',
+		// Tokens
+		'/tokens': 'GET - List tokens (?page=1&pageSize=20&chainId=1&search=name_or_address) | POST - Add new token',
+		'/tokens/tag/:tag': 'GET - Get tokens by tag (?limit=20&chainId=1) - e.g., /tokens/tag/trending',
+		'/tokens/:chainId/:tokenAddress/tags': 'GET - Get all tags for a token | POST - Add tag to token (body: {tag: "trending"})',
+		'/tokens/:chainId/:tokenAddress/tags/:tag': 'DELETE - Remove tag from token',
 
-			// Watched Tokens (Protected)
+		// Watched Tokens (Protected)
 			'/watched-tokens': 'GET - Get user watchlist (requires auth) | POST - Add token to watchlist (requires auth)',
 			'/watched-tokens/:id': 'GET - Get specific watched token (requires auth) | PUT - Update watched token (requires auth) | DELETE - Remove from watchlist (requires auth)',
 			'/watched-tokens/active/all': 'GET - Get all active watched tokens (for alert system)',
