@@ -57,7 +57,14 @@ interface User {
 	email?: string;
 	telegram_id?: string;
 	telegram_username?: string;
+	google_id?: string;
+	apple_id?: string;
+	x_id?: string;
 	password_hash?: string;
+	full_name?: string;
+	avatar_url?: string;
+	bot_started?: boolean;
+	bot_started_at?: string;
 	created_at: string;
 	updated_at: string;
 	last_login_at?: string;
@@ -435,7 +442,7 @@ async function getTokenTags(db: D1Database, tokenId: number): Promise<string[]> 
     const result = await db.prepare(
         'SELECT tag FROM token_tags WHERE token_id = ? ORDER BY created_at DESC'
     ).bind(tokenId).all();
-    
+
     return result.results.map((row: any) => String(row.tag));
 }
 
@@ -512,7 +519,7 @@ async function getTokenId(db: D1Database, chainId: string, tokenAddress: string)
     const result: any = await db.prepare(
         'SELECT id FROM tokens WHERE chain_id = ? AND token_address = ? LIMIT 1'
     ).bind(chainId, tokenAddress).first();
-    
+
     return result ? Number(result.id) : null;
 }
 
@@ -1267,10 +1274,10 @@ async function sendVerificationEmail(
 
 	try {
 		// Using Brevo (formerly Sendinblue) API
-		const subject = purpose === 'register' 
-			? 'Verify Your Email' 
-			: purpose === 'reset-password' 
-				? 'Reset Your Password' 
+		const subject = purpose === 'register'
+			? 'Verify Your Email'
+			: purpose === 'reset-password'
+				? 'Reset Your Password'
 				: 'Your Login Code';
 		const htmlContent = `
 			<!DOCTYPE html>
@@ -2317,7 +2324,7 @@ app.post('/tokens/:chainId/:tokenAddress/tags', async (c) => {
 
 		// Add the tag
 		const result = await addTokenTag(c.env.DB, tokenId, tag);
-		
+
 		if (!result.success) {
 			return c.json({ error: 'Failed to add tag' }, 500);
 		}
@@ -2351,7 +2358,7 @@ app.delete('/tokens/:chainId/:tokenAddress/tags/:tag', async (c) => {
 
 		// Remove the tag
 		const result = await removeTokenTag(c.env.DB, tokenId, tag);
-		
+
 		if (!result) {
 			return c.json({ error: 'Failed to remove tag' }, 500);
 		}
@@ -2956,6 +2963,95 @@ app.post('/auth/reset-password', async (c) => {
 	}
 });
 
+// OAuth Initiation Endpoints
+app.get('/auth/oauth/:provider', async (c) => {
+	try {
+		const provider = c.req.param('provider');
+
+		// Validate provider
+		if (!['google', 'apple', 'x', 'telegram'].includes(provider)) {
+			return c.json({ error: 'Invalid OAuth provider' }, 400);
+		}
+
+		// Generate state parameter for CSRF protection
+		const state = crypto.randomUUID();
+
+		let authUrl: string;
+
+		switch (provider) {
+			case 'google':
+				authUrl = `https://accounts.google.com/o/oauth2/v2/auth?` +
+					`client_id=${c.env.GOOGLE_CLIENT_ID}` +
+					`&redirect_uri=${encodeURIComponent(`${c.env.WORKER_URL || 'https://crypto-pump.bigtutu.workers.dev'}/auth/oauth/callback/google`)}` +
+					`&response_type=code` +
+					`&scope=${encodeURIComponent('openid profile email')}` +
+					`&state=${state}`;
+				break;
+
+			case 'apple':
+				authUrl = `https://appleid.apple.com/auth/authorize?` +
+					`client_id=${c.env.APPLE_CLIENT_ID}` +
+					`&redirect_uri=${encodeURIComponent(`${c.env.WORKER_URL || 'https://crypto-pump.bigtutu.workers.dev'}/auth/oauth/callback/apple`)}` +
+					`&response_type=code` +
+					`&scope=${encodeURIComponent('name email')}` +
+					`&response_mode=form_post` +
+					`&state=${state}`;
+				break;
+
+			case 'x':
+				// X (Twitter) OAuth 2.0
+				authUrl = `https://twitter.com/i/oauth2/authorize?` +
+					`client_id=${c.env.X_CLIENT_ID}` +
+					`&redirect_uri=${encodeURIComponent(`${c.env.WORKER_URL || 'https://crypto-pump.bigtutu.workers.dev'}/auth/oauth/callback/x`)}` +
+					`&response_type=code` +
+					`&scope=${encodeURIComponent('tweet.read users.read offline.access')}` +
+					`&state=${state}` +
+					`&code_challenge=challenge` +
+					`&code_challenge_method=plain`;
+				break;
+
+			case 'telegram':
+				// Telegram OAuth (using Telegram Login Widget redirect)
+				authUrl = `https://oauth.telegram.org/auth?` +
+					`bot_id=${c.env.TELEGRAM_BOT_ID}` +
+					`&origin=${encodeURIComponent(c.env.FRONTEND_URL || 'http://localhost:4200')}` +
+					`&request_access=write` +
+					`&return_to=${encodeURIComponent(`${c.env.WORKER_URL || 'https://crypto-pump.bigtutu.workers.dev'}/auth/oauth/callback/telegram`)}`;
+				break;
+
+			default:
+				return c.json({ error: 'Unsupported provider' }, 400);
+		}
+
+		return c.json({ auth_url: authUrl, state });
+	} catch (error) {
+		console.error('Error initiating OAuth:', error);
+		return c.json({ error: 'Failed to initiate OAuth' }, 500);
+	}
+});
+
+// OAuth Callback (handled by backend, redirects to frontend with tokens)
+app.get('/auth/oauth/callback/:provider', async (c) => {
+	try {
+		const provider = c.req.param('provider');
+		const code = c.req.query('code');
+
+		if (!code) {
+			const frontendUrl = c.env.FRONTEND_URL || 'http://localhost:4200';
+			return c.redirect(`${frontendUrl}/login?error=no_code`);
+		}
+
+		// For now, return a simple message indicating OAuth is configured but needs credentials
+		// In production, you would exchange the code for tokens here
+		const frontendUrl = c.env.FRONTEND_URL || 'http://localhost:4200';
+		return c.redirect(`${frontendUrl}/login?message=oauth_${provider}_pending`);
+	} catch (error) {
+		console.error('Error in OAuth callback:', error);
+		const frontendUrl = c.env.FRONTEND_URL || 'http://localhost:4200';
+		return c.redirect(`${frontendUrl}/login?error=oauth_failed`);
+	}
+});
+
 // Get current user profile (protected route example)
 app.get('/auth/me', async (c) => {
 	try {
@@ -2973,6 +3069,13 @@ app.get('/auth/me', async (c) => {
 				email: user.email,
 				telegram_id: user.telegram_id,
 				telegram_username: user.telegram_username,
+				google_id: user.google_id,
+				apple_id: user.apple_id,
+				x_id: user.x_id,
+				full_name: user.full_name,
+				avatar_url: user.avatar_url,
+				bot_started: user.bot_started,
+				bot_started_at: user.bot_started_at,
 				created_at: user.created_at,
 				last_login_at: user.last_login_at
 			}
@@ -3317,6 +3420,175 @@ app.get('/watched-tokens/active/all', async (c) => {
 	}
 });
 
+// ============== Webhook Routes ==============
+
+// Webhook: Mark bot as started (called by Telegram bot service)
+// Telegram message format: { message: { from: { id: telegram_id }, text: "/start user_id" } }
+// Extract telegram_id from message.from.id and user_id from message.text
+app.post('/webhook/bot', async (c) => {
+	try {
+		const requestBody = await c.req.json();
+		
+		// Log all headers for debugging
+		const allHeaders: Record<string, string> = {};
+		c.req.raw.headers.forEach((value, key) => {
+			// Mask sensitive headers
+			if (key.toLowerCase() === 'x-webhook-secret') {
+				allHeaders[key] = value ? '***MASKED***' : 'missing';
+			} else {
+				allHeaders[key] = value;
+			}
+		});
+		
+		console.log('[WEBHOOK /bot] Request received:', {
+			timestamp: new Date().toISOString(),
+			body: requestBody,
+			headers: allHeaders
+		});
+
+		// Verify webhook secret
+		const webhookSecret = c.req.header('x-telegram-bot-api-secret-token');
+		const expectedSecret = c.env.API_KEY || 'change-this-in-production';
+
+		if (webhookSecret !== expectedSecret) {
+			console.error('[WEBHOOK /bot] Invalid webhook secret');
+			return c.json({ error: 'Unauthorized' }, 401);
+		}
+
+		// Parse request body - support both direct format and Telegram webhook format
+		let user_id: number | undefined;
+		let telegram_id: string | undefined;
+		let telegram_username: string | undefined;
+		let telegram_first_name: string | undefined;
+
+		// Check if it's a Telegram webhook format: { message: { from: { id }, text: "/start user_id" } }
+		if (requestBody.message) {
+			const message = requestBody.message;
+			
+			// Extract telegram data from message.from
+			if (message.from && message.from.id) {
+				telegram_id = message.from.id.toString();
+				telegram_username = message.from.username;
+				telegram_first_name = message.from.first_name;
+				console.log('[WEBHOOK /bot] Extracted from message.from:', { 
+					telegram_id, 
+					telegram_username, 
+					telegram_first_name 
+				});
+			}
+
+			// Extract user_id from message.text (e.g., "/start 3")
+			if (message.text) {
+				const textParts = message.text.split(' ');
+				if (textParts.length >= 2 && textParts[0] === '/start') {
+					const parsedUserId = parseInt(textParts[1]);
+					if (!isNaN(parsedUserId)) {
+						user_id = parsedUserId;
+						console.log('[WEBHOOK /bot] Extracted user_id from message.text:', user_id);
+					}
+				}
+			}
+		} else {
+			// Direct format: { user_id: 123, telegram_id: "456789" }
+			user_id = requestBody.user_id;
+			telegram_id = requestBody.telegram_id;
+		}
+
+		if (!user_id && !telegram_id) {
+			console.error('[WEBHOOK /bot] Missing required fields. Expected either direct format {user_id, telegram_id} or Telegram format {message: {from: {id}, text: "/start user_id"}}');
+			return c.json({ error: 'Either user_id or telegram_id is required' }, 400);
+		}
+
+		console.log('[WEBHOOK /bot] Parsed data:', { user_id, telegram_id, telegram_username });
+
+		// Update bot_started status and link Telegram account
+		let result;
+		if (user_id && telegram_id) {
+			// Link Telegram account and set bot_started (when user clicks deep link with user_id)
+			result = await c.env.DB.prepare(`
+				UPDATE users
+				SET bot_started = TRUE,
+					bot_started_at = CURRENT_TIMESTAMP,
+					telegram_id = ?,
+					telegram_username = ?,
+					updated_at = CURRENT_TIMESTAMP
+				WHERE id = ?
+			`).bind(telegram_id, telegram_username, user_id).run();
+			console.log('[WEBHOOK /bot] Linked Telegram account and set bot_started for user_id:', user_id);
+		} else if (user_id) {
+			// Just set bot_started for user_id (no telegram linking)
+			result = await c.env.DB.prepare(`
+				UPDATE users
+				SET bot_started = TRUE,
+					bot_started_at = CURRENT_TIMESTAMP,
+					updated_at = CURRENT_TIMESTAMP
+				WHERE id = ?
+			`).bind(user_id).run();
+		} else {
+			// Set bot_started for telegram_id (telegram account already linked)
+			result = await c.env.DB.prepare(`
+				UPDATE users
+				SET bot_started = TRUE,
+					bot_started_at = CURRENT_TIMESTAMP,
+					updated_at = CURRENT_TIMESTAMP
+				WHERE telegram_id = ?
+			`).bind(telegram_id).run();
+		}
+
+		if (!result.success || result.meta.changes === 0) {
+			console.error('[WEBHOOK /bot] User not found or update failed:', { user_id, telegram_id });
+			return c.json({ error: 'User not found or update failed' }, 404);
+		}
+
+		console.log('[WEBHOOK /bot] Bot started status updated successfully:', {
+			user_id: user_id || 'N/A',
+			telegram_id: telegram_id || 'N/A',
+			changes: result.meta.changes
+		});
+
+		// Publish bot_started event to WebSocket clients
+		try {
+			const gateway = c.env.TRADE_GATEWAY.get(c.env.TRADE_GATEWAY.idFromName("main-gateway"));
+			const wsEvent = {
+				type: 'bot_started',
+				data: {
+					user_id: user_id,
+					telegram_id: telegram_id,
+					telegram_username: telegram_username,
+					bot_started_at: new Date().toISOString()
+				},
+				timestamp: new Date().toISOString()
+			};
+			
+			const publishRequest = new Request('http://localhost/publish-json', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify(wsEvent)
+			});
+			
+			const publishResponse = await gateway.fetch(publishRequest);
+			const publishResult = await publishResponse.json() as { success: boolean; connectionsNotified: number };
+			
+			console.log('[WEBHOOK /bot] Published bot_started event to WebSocket:', {
+				success: publishResult.success,
+				connectionsNotified: publishResult.connectionsNotified
+			});
+		} catch (wsError) {
+			console.error('[WEBHOOK /bot] Failed to publish WebSocket event:', wsError);
+			// Don't fail the webhook if WebSocket publish fails
+		}
+
+		return c.json({
+			success: true,
+			message: 'Bot started status updated'
+		});
+	} catch (error) {
+		console.error('[WEBHOOK /bot] Error:', error);
+		return c.json({ error: 'Failed to update bot started status' }, 500);
+	}
+});
+
+
 // Root/health check route
 app.get('/', async (c) => {
 	console.log(`[FETCH] Handling root / request`);
@@ -3330,6 +3602,8 @@ app.get('/', async (c) => {
 			'/auth/login': 'POST - Login with email and password OR verification_code',
 			'/auth/reset-password': 'POST - Reset password with email/verification_code/new_password',
 			'/auth/telegram': 'POST - Login/Register with Telegram',
+			'/auth/oauth/:provider': 'GET - Initiate OAuth login (google, apple, x, telegram)',
+			'/auth/oauth/callback/:provider': 'GET - OAuth callback endpoint',
 			'/auth/refresh': 'POST - Refresh access token using refresh token',
 			'/auth/logout': 'POST - Logout and revoke refresh token',
 			'/auth/verify': 'POST - Verify JWT token',
@@ -3355,6 +3629,9 @@ app.get('/', async (c) => {
 			'/watched-tokens': 'GET - Get user watchlist (requires auth) | POST - Add token to watchlist (requires auth)',
 			'/watched-tokens/:id': 'GET - Get specific watched token (requires auth) | PUT - Update watched token (requires auth) | DELETE - Remove from watchlist (requires auth)',
 			'/watched-tokens/active/all': 'GET - Get all active watched tokens (for alert system)',
+
+			// Webhooks (requires x-telegram-bot-api-secret-token header)
+			'/webhook/bot': 'POST - Link Telegram account and mark bot as started (Telegram message format or {user_id, telegram_id})',
 
 			// Candles
 			'/candle-chart': 'GET - Retrieve candle chart data from KV',

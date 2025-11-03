@@ -6,7 +6,14 @@ CREATE TABLE IF NOT EXISTS users (
     email TEXT UNIQUE,
     telegram_id TEXT UNIQUE,
     telegram_username TEXT,
+    google_id TEXT UNIQUE,
+    apple_id TEXT UNIQUE,
+    x_id TEXT UNIQUE,
     password_hash TEXT,
+    full_name TEXT,
+    avatar_url TEXT,
+    bot_started BOOLEAN DEFAULT FALSE,
+    bot_started_at TIMESTAMP,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     last_login_at TIMESTAMP
@@ -15,6 +22,9 @@ CREATE TABLE IF NOT EXISTS users (
 -- Create indexes for efficient querying
 CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
 CREATE INDEX IF NOT EXISTS idx_users_telegram_id ON users(telegram_id);
+CREATE INDEX IF NOT EXISTS idx_users_google_id ON users(google_id);
+CREATE INDEX IF NOT EXISTS idx_users_apple_id ON users(apple_id);
+CREATE INDEX IF NOT EXISTS idx_users_x_id ON users(x_id);
 
 -- Table for email verification codes
 CREATE TABLE IF NOT EXISTS verification_codes (
