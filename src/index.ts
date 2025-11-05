@@ -598,13 +598,16 @@ async function addWatchedToken(
     interval1m?: number,
     interval5m?: number,
     interval15m?: number,
-    interval1h?: number,
-    alertActive: boolean = true
+    interval1h?: number
 ): Promise<{ success: boolean; id: number }> {
+    // During creation, alert_active is always false
+    // Users can only activate it after creation via update
+    const alertActive = false;
+
     const result = await db.prepare(`
         INSERT INTO user_watched_tokens
-        (user_id, token_id, notes, interval_1m, interval_5m, interval_15m, interval_1h, alert_active)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        (user_id, token_id, notes, interval_1m, interval_5m, interval_15m, interval_1h, alert_active, record_refresh)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).bind(
         userId,
         tokenId,
@@ -613,7 +616,8 @@ async function addWatchedToken(
         interval5m || null,
         interval15m || null,
         interval1h || null,
-        alertActive ? 1 : 0
+        alertActive ? 1 : 0,
+        1 // record_refresh = true for new records so they get synced
     ).run();
 
     if (!result.success) {
@@ -731,6 +735,19 @@ async function getWatchedTokenById(
     };
 }
 
+async function getActiveWatchedTokenCount(
+    db: D1Database,
+    userId: number
+): Promise<number> {
+    const result = await db.prepare(`
+        SELECT COUNT(*) as count
+        FROM user_watched_tokens
+        WHERE user_id = ? AND alert_active = 1
+    `).bind(userId).first();
+
+    return Number(result?.count) || 0;
+}
+
 async function updateWatchedToken(
     db: D1Database,
     id: number,
@@ -742,8 +759,32 @@ async function updateWatchedToken(
         interval_15m?: number | null;
         interval_1h?: number | null;
         alert_active?: boolean;
+    },
+    maxActiveTokens: number = 5
+): Promise<{ success: boolean; error?: string }> {
+    // If trying to activate, check the limit
+    if (updates.alert_active === true) {
+        // Get current active count (excluding this token if it's currently active)
+        const currentActiveCount = await getActiveWatchedTokenCount(db, userId);
+        
+        // Check if this token is currently active
+        const currentToken = await db.prepare(`
+            SELECT alert_active FROM user_watched_tokens WHERE id = ? AND user_id = ?
+        `).bind(id, userId).first();
+        
+        const isCurrentlyActive = currentToken?.alert_active === 1;
+        
+        // If token is not currently active, count it towards the limit
+        const wouldBeActiveCount = isCurrentlyActive ? currentActiveCount : currentActiveCount + 1;
+        
+        if (wouldBeActiveCount > maxActiveTokens) {
+            return {
+                success: false,
+                error: `Maximum ${maxActiveTokens} active watched tokens allowed. You currently have ${currentActiveCount} active token(s).`
+            };
+        }
     }
-): Promise<boolean> {
+
     const setParts: string[] = [];
     const values: any[] = [];
 
@@ -770,10 +811,13 @@ async function updateWatchedToken(
     if (updates.alert_active !== undefined) {
         setParts.push('alert_active = ?');
         values.push(updates.alert_active ? 1 : 0);
+        
+        // When alert_active changes, set record_refresh = true to sync with memory
+        setParts.push('record_refresh = 1');
     }
 
     if (setParts.length === 0) {
-        return false; // No updates provided
+        return { success: false, error: 'No updates provided' };
     }
 
     values.push(id, userId);
@@ -785,7 +829,7 @@ async function updateWatchedToken(
     `;
 
     const result = await db.prepare(query).bind(...values).run();
-    return result.success;
+    return { success: result.success };
 }
 
 async function deleteWatchedToken(
@@ -1144,6 +1188,16 @@ async function bindTelegramToUser(
 		if (!result.success) {
 			return { success: false, error: 'Failed to bind Telegram account' };
 		}
+
+		// Sync telegram_id to notification_preferences
+		// Set record_refresh = true to sync with memory
+		await db.prepare(`
+			UPDATE notification_preferences
+			SET telegram_id = ?,
+			    record_refresh = 1,
+			    updated_at = CURRENT_TIMESTAMP
+			WHERE user_id = ?
+		`).bind(telegramId, userId).run();
 
 		return { success: true };
 	} catch (error) {
@@ -3118,12 +3172,12 @@ app.get('/user/notification-preferences', async (c) => {
 		}
 
 		// Fetch notification preferences from database
-		const preferences = await c.env.DB.prepare('SELECT email_enabled, telegram_enabled FROM notification_preferences WHERE user_id = ?').bind(user.id).first<{ email_enabled: number; telegram_enabled: number }>();
+		const preferences = await c.env.DB.prepare('SELECT email_enabled, telegram_enabled FROM notification_preferences WHERE user_id = ?').bind(user.id).first() as { email_enabled: number; telegram_enabled: number } | null;
 
 		// If no preferences found, return defaults
 		if (!preferences) {
 			return c.json({
-				email_enabled: true,
+				email_enabled: false,
 				telegram_enabled: false
 			});
 		}
@@ -3155,24 +3209,61 @@ app.put('/user/notification-preferences', async (c) => {
 		}
 
 		// Get current preferences or defaults
-		const current = await c.env.DB.prepare('SELECT email_enabled, telegram_enabled FROM notification_preferences WHERE user_id = ?').bind(user.id).first<{ email_enabled: number; telegram_enabled: number }>();
+		const current = await c.env.DB.prepare('SELECT email_enabled, telegram_enabled FROM notification_preferences WHERE user_id = ?').bind(user.id).first() as { email_enabled: number; telegram_enabled: number } | null;
 
-		const emailEnabled = typeof body.email_enabled === 'boolean'
+		// Determine current values
+		const currentEmailEnabled = current?.email_enabled === 1 ? true : current?.email_enabled === 0 ? false : false;
+		const currentTelegramEnabled = current?.telegram_enabled === 1 ? true : current?.telegram_enabled === 0 ? false : false;
+
+		// Determine the new values
+		let emailEnabled = typeof body.email_enabled === 'boolean'
 			? body.email_enabled
-			: (current?.email_enabled === 1 ? true : current?.email_enabled === 0 ? false : true);
-		const telegramEnabled = typeof body.telegram_enabled === 'boolean'
+			: currentEmailEnabled;
+		let telegramEnabled = typeof body.telegram_enabled === 'boolean'
 			? body.telegram_enabled
-			: (current?.telegram_enabled === 1 ? true : current?.telegram_enabled === 0 ? false : false);
+			: currentTelegramEnabled;
 
-		// Upsert notification preferences
+		// Enforce mutual exclusivity: only one notification method can be enabled at a time
+		// Check if user is trying to enable a method while the other is already enabled
+		if (typeof body.email_enabled === 'boolean' && body.email_enabled === true && currentTelegramEnabled) {
+			// User is trying to enable email but telegram is already enabled
+			return c.json({ 
+				error: 'Email notifications cannot be enabled while Telegram notifications are active. Please disable Telegram notifications first.' 
+			}, 400);
+		}
+
+		if (typeof body.telegram_enabled === 'boolean' && body.telegram_enabled === true && currentEmailEnabled) {
+			// User is trying to enable telegram but email is already enabled
+			return c.json({ 
+				error: 'Telegram notifications cannot be enabled while Email notifications are active. Please disable Email notifications first.' 
+			}, 400);
+		}
+
+		// Get user's email and telegram_id from users table
+		const userData = await c.env.DB.prepare('SELECT email, telegram_id FROM users WHERE id = ?').bind(user.id).first() as { email: string | null; telegram_id: string | null } | null;
+
+		// Upsert notification preferences with email and telegram_id
+		// Set record_refresh = true when preferences change to sync with memory
 		await c.env.DB.prepare(`
-			INSERT INTO notification_preferences (user_id, email_enabled, telegram_enabled, created_at, updated_at)
-			VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+			INSERT INTO notification_preferences (user_id, email, telegram_id, email_enabled, telegram_enabled, record_refresh, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
 			ON CONFLICT(user_id) DO UPDATE SET
+				email = excluded.email,
+				telegram_id = excluded.telegram_id,
 				email_enabled = excluded.email_enabled,
 				telegram_enabled = excluded.telegram_enabled,
+				record_refresh = 1,
 				updated_at = CURRENT_TIMESTAMP
-		`).bind(user.id, emailEnabled ? 1 : 0, telegramEnabled ? 1 : 0).run();
+		`).bind(user.id, userData?.email || null, userData?.telegram_id || null, emailEnabled ? 1 : 0, telegramEnabled ? 1 : 0).run();
+
+		// If both notification methods are disabled, deactivate all watched tokens for this user
+		if (!emailEnabled && !telegramEnabled) {
+			await c.env.DB.prepare(`
+				UPDATE user_watched_tokens
+				SET alert_active = 0, record_refresh = 1
+				WHERE user_id = ? AND alert_active = 1
+			`).bind(user.id).run();
+		}
 
 		return c.json({
 			email_enabled: emailEnabled,
@@ -3293,11 +3384,17 @@ app.post('/watched-tokens', async (c) => {
 		}
 
 		const body = await c.req.json();
-		const { token_id, notes, interval_1m, interval_5m, interval_15m, interval_1h, alert_active } = body;
+		const { token_id, notes, interval_1m, interval_5m, interval_15m, interval_1h } = body;
 
 		// Validate required fields
 		if (!token_id) {
 			return c.json({ error: 'token_id is required' }, 400);
+		}
+
+		// alert_active cannot be set during creation - it defaults to false
+		// Users can only activate tokens after creation via update endpoint
+		if (body.alert_active !== undefined) {
+			return c.json({ error: 'alert_active cannot be set during creation. Use the update endpoint to activate tokens.' }, 400);
 		}
 
 		// Validate interval thresholds
@@ -3332,8 +3429,7 @@ app.post('/watched-tokens', async (c) => {
 			interval_1m,
 			interval_5m,
 			interval_15m,
-			interval_1h,
-			alert_active !== undefined ? alert_active : true
+			interval_1h
 		);
 
 		// Get the full watched token details
@@ -3454,10 +3550,10 @@ app.put('/watched-tokens/:id', async (c) => {
 			}
 		}
 
-		const success = await updateWatchedToken(c.env.DB, id, user.id, updates);
+		const result = await updateWatchedToken(c.env.DB, id, user.id, updates);
 
-		if (!success) {
-			return c.json({ error: 'Watched token not found or update failed' }, 404);
+		if (!result.success) {
+			return c.json({ error: result.error || 'Watched token not found or update failed' }, 400);
 		}
 
 		// Get the updated watched token
@@ -3601,6 +3697,7 @@ app.post('/webhook/bot', async (c) => {
 
 		// Update bot_started status and link Telegram account
 		let result;
+		let updatedUserId = user_id;
 		if (user_id && telegram_id) {
 			// Link Telegram account and set bot_started (when user clicks deep link with user_id)
 			result = await c.env.DB.prepare(`
@@ -3613,6 +3710,15 @@ app.post('/webhook/bot', async (c) => {
 				WHERE id = ?
 			`).bind(telegram_id, telegram_username, user_id).run();
 			console.log('[WEBHOOK /bot] Linked Telegram account and set bot_started for user_id:', user_id);
+			// Sync telegram_id to notification_preferences
+			// Set record_refresh = true to sync with memory
+			await c.env.DB.prepare(`
+				UPDATE notification_preferences
+				SET telegram_id = ?,
+				    record_refresh = 1,
+				    updated_at = CURRENT_TIMESTAMP
+				WHERE user_id = ?
+			`).bind(telegram_id, user_id).run();
 		} else if (user_id) {
 			// Just set bot_started for user_id (no telegram linking)
 			result = await c.env.DB.prepare(`
@@ -3624,13 +3730,29 @@ app.post('/webhook/bot', async (c) => {
 			`).bind(user_id).run();
 		} else {
 			// Set bot_started for telegram_id (telegram account already linked)
-			result = await c.env.DB.prepare(`
-				UPDATE users
-				SET bot_started = TRUE,
-					bot_started_at = CURRENT_TIMESTAMP,
-					updated_at = CURRENT_TIMESTAMP
-				WHERE telegram_id = ?
-			`).bind(telegram_id).run();
+			if (telegram_id) {
+				result = await c.env.DB.prepare(`
+					UPDATE users
+					SET bot_started = TRUE,
+						bot_started_at = CURRENT_TIMESTAMP,
+						updated_at = CURRENT_TIMESTAMP
+					WHERE telegram_id = ?
+				`).bind(telegram_id).run();
+				// Get user_id from telegram_id
+				const user = await getUserByTelegramId(c.env.DB, telegram_id);
+				if (user) {
+					updatedUserId = user.id;
+					// Sync telegram_id to notification_preferences
+					// Set record_refresh = true to sync with memory
+					await c.env.DB.prepare(`
+						UPDATE notification_preferences
+						SET telegram_id = ?,
+						    record_refresh = 1,
+						    updated_at = CURRENT_TIMESTAMP
+						WHERE user_id = ?
+					`).bind(telegram_id, user.id).run();
+				}
+			}
 		}
 
 		if (!result.success || result.meta.changes === 0) {
@@ -3998,7 +4120,7 @@ app.get('/db/users/:userId/notification-preferences', async (c) => {
 				success: true,
 				data: {
 					user_id: userId,
-					email_enabled: true,
+					email_enabled: false,
 					telegram_enabled: false
 				}
 			});

@@ -30,8 +30,11 @@ CREATE INDEX IF NOT EXISTS idx_users_x_id ON users(x_id);
 CREATE TABLE IF NOT EXISTS notification_preferences (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL UNIQUE,
-    email_enabled BOOLEAN NOT NULL DEFAULT 1,
+    email TEXT,
+    telegram_id TEXT,
+    email_enabled BOOLEAN NOT NULL DEFAULT 0,
     telegram_enabled BOOLEAN NOT NULL DEFAULT 0,
+    record_refresh BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
@@ -104,6 +107,7 @@ CREATE TABLE IF NOT EXISTS user_watched_tokens (
     interval_15m DECIMAL(10,2), -- Price change threshold for 15 minute interval (percentage)
     interval_1h DECIMAL(10,2), -- Price change threshold for 1 hour interval (percentage)
     alert_active BOOLEAN DEFAULT TRUE, -- Whether alerts are enabled for this watched token
+    record_refresh BOOLEAN DEFAULT FALSE, -- Flag to indicate this record needs to be synced with memory
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
     FOREIGN KEY (token_id) REFERENCES tokens(id) ON DELETE CASCADE
@@ -111,7 +115,7 @@ CREATE TABLE IF NOT EXISTS user_watched_tokens (
 
 -- Create indexes for efficient querying
 CREATE INDEX IF NOT EXISTS idx_watched_user_id ON user_watched_tokens(user_id);
-CREATE INDEX IF NOT EXISTS idx_watched_token_id ON user_watched_tokens(token_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_watched_token_id ON user_watched_tokens(token_id);
 CREATE INDEX IF NOT EXISTS idx_watched_created_at ON user_watched_tokens(created_at);
 CREATE INDEX IF NOT EXISTS idx_watched_alert_active ON user_watched_tokens(alert_active);
 
