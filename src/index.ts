@@ -2,6 +2,7 @@ import { DurableObject } from 'cloudflare:workers';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { jwtVerify, SignJWT } from 'jose';
+import { renderHomePage } from './templates/home';
 
 /**
  * WebSocket Gateway using Cloudflare Durable Objects + Pool Information Management
@@ -766,17 +767,17 @@ async function updateWatchedToken(
     if (updates.alert_active === true) {
         // Get current active count (excluding this token if it's currently active)
         const currentActiveCount = await getActiveWatchedTokenCount(db, userId);
-        
+
         // Check if this token is currently active
         const currentToken = await db.prepare(`
             SELECT alert_active FROM user_watched_tokens WHERE id = ? AND user_id = ?
         `).bind(id, userId).first();
-        
+
         const isCurrentlyActive = currentToken?.alert_active === 1;
-        
+
         // If token is not currently active, count it towards the limit
         const wouldBeActiveCount = isCurrentlyActive ? currentActiveCount : currentActiveCount + 1;
-        
+
         if (wouldBeActiveCount > maxActiveTokens) {
             return {
                 success: false,
@@ -811,7 +812,7 @@ async function updateWatchedToken(
     if (updates.alert_active !== undefined) {
         setParts.push('alert_active = ?');
         values.push(updates.alert_active ? 1 : 0);
-        
+
         // When alert_active changes, set record_refresh = true to sync with memory
         setParts.push('record_refresh = 1');
     }
@@ -3227,15 +3228,15 @@ app.put('/user/notification-preferences', async (c) => {
 		// Check if user is trying to enable a method while the other is already enabled
 		if (typeof body.email_enabled === 'boolean' && body.email_enabled === true && currentTelegramEnabled) {
 			// User is trying to enable email but telegram is already enabled
-			return c.json({ 
-				error: 'Email notifications cannot be enabled while Telegram notifications are active. Please disable Telegram notifications first.' 
+			return c.json({
+				error: 'Email notifications cannot be enabled while Telegram notifications are active. Please disable Telegram notifications first.'
 			}, 400);
 		}
 
 		if (typeof body.telegram_enabled === 'boolean' && body.telegram_enabled === true && currentEmailEnabled) {
 			// User is trying to enable telegram but email is already enabled
-			return c.json({ 
-				error: 'Telegram notifications cannot be enabled while Email notifications are active. Please disable Email notifications first.' 
+			return c.json({
+				error: 'Telegram notifications cannot be enabled while Email notifications are active. Please disable Email notifications first.'
 			}, 400);
 		}
 
@@ -3868,9 +3869,9 @@ app.post('/db/query', async (c) => {
 		return c.json(result);
 	} catch (error: any) {
 		console.error('Error executing SQL query:', error);
-		return c.json({ 
+		return c.json({
 			error: 'Failed to execute SQL query',
-			message: error.message 
+			message: error.message
 		}, 500);
 	}
 });
@@ -3946,9 +3947,9 @@ app.post('/db/query/batch', async (c) => {
 		});
 	} catch (error: any) {
 		console.error('Error executing batch SQL queries:', error);
-		return c.json({ 
+		return c.json({
 			error: 'Failed to execute batch SQL queries',
-			message: error.message 
+			message: error.message
 		}, 500);
 	}
 });
@@ -4194,9 +4195,84 @@ app.get('/db/tokens/id/:tokenId', async (c) => {
 	}
 });
 
-// Root/health check route
+// Root route - SEO-optimized HTML page
 app.get('/', async (c) => {
 	console.log(`[FETCH] Handling root / request`);
+	const url = new URL(c.req.url);
+	const baseUrl = `${url.protocol}//${url.host}`;
+
+	const html = renderHomePage(baseUrl);
+	
+	return c.html(html);
+});
+
+// Robots.txt route for SEO
+app.get('/robots.txt', async (c) => {
+	const robotsTxt = `User-agent: *
+Allow: /
+Allow: /tokens
+Allow: /pools
+Allow: /candle-chart
+
+# Disallow API endpoints that don't need indexing
+Disallow: /auth/
+Disallow: /watched-tokens
+Disallow: /ws
+Disallow: /publish
+Disallow: /webhook/
+
+# Sitemap location
+Sitemap: ${new URL(c.req.url).origin}/sitemap.xml
+`;
+	return c.text(robotsTxt, 200, {
+		'Content-Type': 'text/plain; charset=utf-8'
+	});
+});
+
+// Sitemap.xml route for SEO
+app.get('/sitemap.xml', async (c) => {
+	const url = new URL(c.req.url);
+	const baseUrl = `${url.protocol}//${url.host}`;
+	const now = new Date().toISOString();
+
+	const sitemap = `<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
+		xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+		xsi:schemaLocation="http://www.sitemaps.org/schemas/sitemap/0.9
+		http://www.sitemaps.org/schemas/sitemap/0.9/sitemap.xsd">
+	<url>
+		<loc>${baseUrl}/</loc>
+		<lastmod>${now}</lastmod>
+		<changefreq>daily</changefreq>
+		<priority>1.0</priority>
+	</url>
+	<url>
+		<loc>${baseUrl}/tokens</loc>
+		<lastmod>${now}</lastmod>
+		<changefreq>hourly</changefreq>
+		<priority>0.9</priority>
+	</url>
+	<url>
+		<loc>${baseUrl}/pools</loc>
+		<lastmod>${now}</lastmod>
+		<changefreq>hourly</changefreq>
+		<priority>0.9</priority>
+	</url>
+	<url>
+		<loc>${baseUrl}/candle-chart</loc>
+		<lastmod>${now}</lastmod>
+		<changefreq>hourly</changefreq>
+		<priority>0.8</priority>
+	</url>
+</urlset>`;
+
+	return c.text(sitemap, 200, {
+		'Content-Type': 'application/xml; charset=utf-8'
+	});
+});
+
+// API documentation route (JSON format for programmatic access)
+app.get('/api', async (c) => {
 	return c.json({
 		service: 'WebSocket Trade Data Gateway with Authentication',
 		endpoints: {
@@ -4224,13 +4300,13 @@ app.get('/', async (c) => {
 			'/pools/add': 'POST - Add new pool information',
 			'/pools/search': 'GET - Search pools by name (?q=query)',
 
-		// Tokens
-		'/tokens': 'GET - List tokens (?page=1&pageSize=20&chainId=1&search=name_or_address) | POST - Add new token',
-		'/tokens/tag/:tag': 'GET - Get tokens by tag (?limit=20&chainId=1) - e.g., /tokens/tag/trending',
-		'/tokens/:chainId/:tokenAddress/tags': 'GET - Get all tags for a token | POST - Add tag to token (body: {tag: "trending"})',
-		'/tokens/:chainId/:tokenAddress/tags/:tag': 'DELETE - Remove tag from token',
+			// Tokens
+			'/tokens': 'GET - List tokens (?page=1&pageSize=20&chainId=1&search=name_or_address) | POST - Add new token',
+			'/tokens/tag/:tag': 'GET - Get tokens by tag (?limit=20&chainId=1) - e.g., /tokens/tag/trending',
+			'/tokens/:chainId/:tokenAddress/tags': 'GET - Get all tags for a token | POST - Add tag to token (body: {tag: "trending"})',
+			'/tokens/:chainId/:tokenAddress/tags/:tag': 'DELETE - Remove tag from token',
 
-		// Watched Tokens (Protected)
+			// Watched Tokens (Protected)
 			'/watched-tokens': 'GET - Get user watchlist (requires auth) | POST - Add token to watchlist (requires auth)',
 			'/watched-tokens/:id': 'GET - Get specific watched token (requires auth) | PUT - Update watched token (requires auth) | DELETE - Remove from watchlist (requires auth)',
 			'/watched-tokens/active/all': 'GET - Get all active watched tokens (for alert system)',
@@ -4242,7 +4318,8 @@ app.get('/', async (c) => {
 			'/candle-chart': 'GET - Retrieve candle chart data from KV',
 			'/single-candle': 'GET - Retrieve single candle data from KV',
 
-			'/': 'GET - This info page'
+			'/': 'GET - SEO-optimized homepage',
+			'/api': 'GET - This API documentation (JSON format)'
 		},
 		features: [
 			'JWT-based authentication',
