@@ -5,7 +5,7 @@
 
 export function renderHomePage(baseUrl: string): string {
 	const currentYear = new Date().getFullYear();
-	
+
 	return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -178,74 +178,6 @@ export function renderHomePage(baseUrl: string): string {
 				<h3>🎯 Use Cases</h3>
 				<p><strong>Developers:</strong> Embed token price widgets, balance displays, and price charts in your Web3/fintech products.<br><strong>Traders:</strong> Monitor price movements, set alerts, and track portfolio performance.</p>
 			</div>
-		</div>
-
-		<h2>🔌 API Endpoints</h2>
-
-		<h3>Authentication</h3>
-		<div class="endpoint-list">
-			<div class="endpoint"><span class="badge badge-post">POST</span> <code>/auth/register</code> - Register new user</div>
-			<div class="endpoint"><span class="badge badge-post">POST</span> <code>/auth/login</code> - Login with credentials</div>
-			<div class="endpoint"><span class="badge badge-post">POST</span> <code>/auth/send-code</code> - Send verification code</div>
-			<div class="endpoint"><span class="badge badge-get">GET</span> <code>/auth/me</code> <span class="badge badge-protected">Protected</span> - Get user profile</div>
-			<div class="endpoint"><span class="badge badge-post">POST</span> <code>/auth/refresh</code> - Refresh access token</div>
-		</div>
-
-		<h3>Tokens & Trading</h3>
-		<div class="endpoint-list">
-			<div class="endpoint"><span class="badge badge-get">GET</span> <code>/tokens</code> - List tokens with pagination</div>
-			<div class="endpoint"><span class="badge badge-get">GET</span> <code>/tokens/tag/:tag</code> - Get tokens by tag</div>
-			<div class="endpoint"><span class="badge badge-get">GET</span> <code>/candle-chart</code> - Retrieve candle chart data</div>
-			<div class="endpoint"><span class="badge badge-get">GET</span> <code>/pools</code> - List liquidity pools</div>
-		</div>
-
-		<h3>Watchlist & Alerts</h3>
-		<div class="endpoint-list">
-			<div class="endpoint"><span class="badge badge-get">GET</span> <code>/watched-tokens</code> <span class="badge badge-protected">Protected</span> - Get user watchlist</div>
-			<div class="endpoint"><span class="badge badge-post">POST</span> <code>/watched-tokens</code> <span class="badge badge-protected">Protected</span> - Add token to watchlist</div>
-			<div class="endpoint"><span class="badge badge-put">PUT</span> <code>/watched-tokens/:id</code> <span class="badge badge-protected">Protected</span> - Update watched token</div>
-		</div>
-
-		<h3>WebSocket</h3>
-		<div class="endpoint-list">
-			<div class="endpoint"><span class="badge badge-get">GET</span> <code>/ws</code> - Connect to WebSocket for real-time data</div>
-			<div class="endpoint"><span class="badge badge-get">GET</span> <code>/stats</code> - Get WebSocket connection statistics</div>
-		</div>
-
-		<h2>🔧 Quick Start</h2>
-
-		<h3>For Developers: Integrate Token Price Widget</h3>
-		<div class="code">
-// Get token price data (no auth required for public endpoints)
-GET /tokens?chainId=1&search=USDT
-GET /candle-chart?chainId=1&tokenAddress=0x...
-
-// Connect to WebSocket for real-time updates
-GET /ws
-// Subscribe to token price updates for your widget
-
-// Get user's token balance (requires auth)
-GET /watched-tokens
-Authorization: Bearer &lt;your_access_token&gt;
-		</div>
-
-		<h3>For Traders: Set Up Price Monitoring</h3>
-		<div class="code">
-// Register and login
-POST /auth/register
-POST /auth/login
-
-// Add token to watchlist with price alerts
-POST /watched-tokens
-Authorization: Bearer &lt;your_access_token&gt;
-{
-	"chain_id": "1",
-	"token_address": "0x...",
-	"alert_threshold_1m": 5.0,
-	"alert_threshold_5m": 10.0
-}
-
-// Monitor price changes via email/Telegram alerts
 		</div>
 
 		<h2>📚 Documentation</h2>
