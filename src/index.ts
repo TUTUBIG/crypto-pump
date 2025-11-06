@@ -4393,8 +4393,8 @@ async function handleCandleChart(request: Request, env: Env): Promise<Response> 
 			const dd = String(targetDate.getUTCDate()).padStart(2, '0');
 			const dateStr = `${yyyy}-${mm}-${dd}`;
 
-			// Compose the key for this day's candle data
-			const key = `${tokenId}-${timeframe}-${dateStr}`;
+			// Compose the key for this day's candle data: interval-date-tokenID
+			const key = `${timeframe}-${dateStr}-${tokenId}`;
 
 			// Try to retrieve candle data for this day from KV
 			candleData = await env.KV.get(key, 'text');
@@ -4444,8 +4444,8 @@ async function handleSingleCandle(request: Request, env: Env): Promise<Response>
 			return new Response('Empty token_id', { status: 400 });
 		}
 
-		// Compose the key for this day's candle data
-		const key = `${tokenId}-${timeframe}-current`;
+		// Compose the key for latest candle data: interval-current-tokenID
+		const key = `${timeframe}-current-${tokenId}`;
 
 		// Retrieve candle data for this day from KV
 		const candleData = await env.KV.get(key, 'text');
