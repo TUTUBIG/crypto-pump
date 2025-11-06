@@ -2334,7 +2334,8 @@ app.get('/tokens', async (c) => {
 	}
 });
 
-// Get tokens by tag (e.g., trending)
+// Get tokens by tag (e.g., trending, hot, pumping, rising)
+// Performance-optimized: uses KV storage for hot/pumping/rising tags
 app.get('/tokens/tag/:tag', async (c) => {
 	try {
 		const tag = c.req.param('tag');
@@ -2345,14 +2346,58 @@ app.get('/tokens/tag/:tag', async (c) => {
 			return c.json({ error: 'Tag parameter is required' }, 400);
 		}
 
-		const tokens = await getTokensByTag(c.env.DB, tag, limit, chainId);
+		// Performance optimization: use KV storage for hot/pumping/rising tags
+		const kvTags = ['hot', 'pumping', 'rising'];
+		if (kvTags.includes(tag.toLowerCase())) {
+			try {
+				// Try to get from KV storage first (fast path)
+				const kvKey = `label-${tag.toLowerCase()}`;
+				const kvData = await c.env.KV.get(kvKey, 'json');
+
+				if (kvData && Array.isArray(kvData)) {
+					// Convert KV data to token format (all basic info is already in KV)
+					// token_id is generated using GenerateTokenId(chain_id, token_address)
+					let tokens = kvData.map((tokenData: any) => ({
+						token_id: tokenData.token_id || `${tokenData.chain_id}-${tokenData.token_address}`.toLowerCase().replace(/^0x/, ''),
+						chain_id: tokenData.chain_id,
+						token_address: tokenData.token_address,
+						token_symbol: tokenData.token_symbol,
+						token_name: tokenData.token_name,
+						decimals: tokenData.decimals || 18,
+						icon_url: tokenData.icon_url || undefined,
+						daily_volume_usd: tokenData.volume_usd || 0,
+						price_change_rate: tokenData.price_change_rate || 0,
+						transaction_count: tokenData.transaction_count || 0,
+						tagged_at: new Date((tokenData.last_updated || Date.now() / 1000) * 1000).toISOString()
+					}));
+
+					// Apply chainId filter if specified
+					if (chainId) {
+						tokens = tokens.filter((t: any) => t.chain_id === chainId);
+					}
+
+					// Apply limit
+					tokens = tokens.slice(0, limit);
+
+					return c.json({
+						success: true,
+						data: tokens,
+						count: tokens.length,
+						tag,
+						chainId: chainId || 'all',
+					});
+				}
+			} catch (kvError) {
+				console.warn('Failed to get tokens from KV, falling back to database:', kvError);
+			}
+		}
 
 		return c.json({
 			success: true,
-			data: tokens,
-			count: tokens.length,
+			data: null,
+			count: 0,
 			tag,
-			chainId: chainId || 'all'
+			chainId: chainId || 'all',
 		});
 	} catch (error) {
 		console.error('Error getting tokens by tag:', error);
@@ -4202,7 +4247,7 @@ app.get('/', async (c) => {
 	const baseUrl = `${url.protocol}//${url.host}`;
 
 	const html = renderHomePage(baseUrl);
-	
+
 	return c.html(html);
 });
 
@@ -4302,7 +4347,7 @@ app.get('/api', async (c) => {
 
 			// Tokens
 			'/tokens': 'GET - List tokens (?page=1&pageSize=20&chainId=1&search=name_or_address) | POST - Add new token',
-			'/tokens/tag/:tag': 'GET - Get tokens by tag (?limit=20&chainId=1) - e.g., /tokens/tag/trending',
+			'/tokens/tag/:tag': 'GET - Get tokens by tag (?limit=20&chainId=1) - e.g., /tokens/tag/trending. Performance-optimized: uses KV storage for hot/pumping/rising tags',
 			'/tokens/:chainId/:tokenAddress/tags': 'GET - Get all tags for a token | POST - Add tag to token (body: {tag: "trending"})',
 			'/tokens/:chainId/:tokenAddress/tags/:tag': 'DELETE - Remove tag from token',
 
