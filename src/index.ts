@@ -3199,6 +3199,8 @@ app.get('/auth/me', async (c) => {
 				avatar_url: user.avatar_url,
 				bot_started: user.bot_started,
 				bot_started_at: user.bot_started_at,
+				email_enabled: user.email_enabled ?? false,
+				telegram_enabled: user.telegram_enabled ?? false,
 				created_at: user.created_at,
 				last_login_at: user.last_login_at
 			}
