@@ -2340,7 +2340,6 @@ app.get('/tokens/tag/:tag', async (c) => {
 	try {
 		const tag = c.req.param('tag');
 		const limit = Math.min(parseInt(c.req.query('limit') || '20'), 100);
-		const chainId = c.req.query('chainId') || undefined;
 
 		if (!tag) {
 			return c.json({ error: 'Tag parameter is required' }, 400);
@@ -2371,11 +2370,6 @@ app.get('/tokens/tag/:tag', async (c) => {
 						tagged_at: new Date((tokenData.last_updated || Date.now() / 1000) * 1000).toISOString()
 					}));
 
-					// Apply chainId filter if specified
-					if (chainId) {
-						tokens = tokens.filter((t: any) => t.chain_id === chainId);
-					}
-
 					// Apply limit
 					tokens = tokens.slice(0, limit);
 
@@ -2383,8 +2377,7 @@ app.get('/tokens/tag/:tag', async (c) => {
 						success: true,
 						data: tokens,
 						count: tokens.length,
-						tag,
-						chainId: chainId || 'all',
+						tag
 					});
 				}
 			} catch (kvError) {
@@ -2396,8 +2389,7 @@ app.get('/tokens/tag/:tag', async (c) => {
 			success: true,
 			data: null,
 			count: 0,
-			tag,
-			chainId: chainId || 'all',
+			tag
 		});
 	} catch (error) {
 		console.error('Error getting tokens by tag:', error);
