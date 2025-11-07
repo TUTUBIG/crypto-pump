@@ -1048,7 +1048,8 @@ async function authenticateUser(c: any): Promise<User | null> {
 		return null;
 	}
 
-	return result as User;
+	// Convert SQLite boolean (0/1) to JavaScript boolean
+	return convertUserFromDB(result);
 }
 
 // User database functions
@@ -1080,12 +1081,28 @@ async function createUserWithEmail(
 	}
 }
 
+// Helper function to convert SQLite boolean (0/1) to JavaScript boolean
+function convertUserFromDB(user: any): User {
+	if (!user) {
+		return user;
+	}
+	return {
+		...user,
+		bot_started: user.bot_started === 1 || user.bot_started === true || user.bot_started === '1'
+	} as User;
+}
+
 async function getUserByEmail(db: D1Database, email: string): Promise<User | null> {
 	const result = await db.prepare(
 		'SELECT * FROM users WHERE email = ?'
 	).bind(email).first();
 
-	return result as User | null;
+	if (!result) {
+		return null;
+	}
+
+	// Convert SQLite boolean (0/1) to JavaScript boolean
+	return convertUserFromDB(result);
 }
 
 async function updateUserPassword(
@@ -1148,7 +1165,12 @@ async function getUserByTelegramId(db: D1Database, telegramId: string): Promise<
 		'SELECT * FROM users WHERE telegram_id = ?'
 	).bind(telegramId).first();
 
-	return result as User | null;
+	if (!result) {
+		return null;
+	}
+
+	// Convert SQLite boolean (0/1) to JavaScript boolean
+	return convertUserFromDB(result);
 }
 
 async function updateUserLastLogin(db: D1Database, userId: number): Promise<boolean> {
@@ -2678,9 +2700,10 @@ app.post('/auth/register', async (c) => {
 		}
 
 		// Fetch the newly created user to get all fields
-		const newUser = await c.env.DB.prepare(
+		const newUserResult = await c.env.DB.prepare(
 			'SELECT * FROM users WHERE id = ?'
-		).bind(result.userId).first() as User;
+		).bind(result.userId).first();
+		const newUser = convertUserFromDB(newUserResult);
 
 		return c.json({
 			success: true,
@@ -2863,9 +2886,10 @@ app.post('/auth/telegram', async (c) => {
 			}
 
 			// Fetch updated user
-			const updatedUser = await c.env.DB.prepare(
+			const updatedUserResult = await c.env.DB.prepare(
 				'SELECT * FROM users WHERE id = ?'
-			).bind(authenticatedUser.id).first() as User;
+			).bind(authenticatedUser.id).first();
+			const updatedUser = convertUserFromDB(updatedUserResult);
 
 			return c.json({
 				success: true,
@@ -4104,9 +4128,12 @@ app.get('/db/users/:userId', async (c) => {
 			return c.json({ error: 'User not found' }, 404);
 		}
 
+		// Convert SQLite boolean (0/1) to JavaScript boolean
+		const user = convertUserFromDB(result);
+
 		return c.json({
 			success: true,
-			data: result
+			data: user
 		});
 	} catch (error) {
 		console.error('Error getting user:', error);
@@ -4131,9 +4158,12 @@ app.get('/db/users/telegram/:telegramId', async (c) => {
 			return c.json({ error: 'User not found' }, 404);
 		}
 
+		// Convert SQLite boolean (0/1) to JavaScript boolean
+		const user = convertUserFromDB(result);
+
 		return c.json({
 			success: true,
-			data: result
+			data: user
 		});
 	} catch (error) {
 		console.error('Error getting user by Telegram ID:', error);
