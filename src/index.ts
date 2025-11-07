@@ -2351,7 +2351,12 @@ app.get('/tokens/tag/:tag', async (c) => {
 			try {
 				// Try to get from KV storage first (fast path)
 				const kvKey = `label-${tag.toLowerCase()}`;
-				const kvData = await c.env.KV.get(kvKey, 'json');
+				const kvDataBase64 = await c.env.KV.get(kvKey, 'text');
+
+				// Decode base64 to get JSON string
+				const jsonString = atob(kvDataBase64);
+				// Parse JSON
+				const kvData = JSON.parse(jsonString);
 
 				if (kvData && Array.isArray(kvData)) {
 					// Convert KV data to token format (all basic info is already in KV)
