@@ -3220,8 +3220,6 @@ app.get('/auth/me', async (c) => {
 				avatar_url: user.avatar_url,
 				bot_started: user.bot_started,
 				bot_started_at: user.bot_started_at,
-				email_enabled: user.email_enabled ?? false,
-				telegram_enabled: user.telegram_enabled ?? false,
 				created_at: user.created_at,
 				last_login_at: user.last_login_at
 			}
@@ -4436,6 +4434,61 @@ export default {
 } satisfies ExportedHandler<Env>;
 
 /**
+ * Get mod number for a given interval (in seconds)
+ * Maps intervals to mod numbers matching Go code: 1 minute = 1, 5 minutes = 5, 1 hour = 60
+ */
+function getModNumber(intervalSeconds: number): number {
+	const intervalMinutes = intervalSeconds / 60;
+
+	// Map intervals to mod numbers (matching Go IntervalModNumbers)
+	if (intervalMinutes === 1) return 1;
+	if (intervalMinutes === 5) return 5;
+	if (intervalMinutes === 60) return 60;
+	if (intervalMinutes === 24 * 60) return 24 * 60;
+	if (intervalMinutes === 7 * 24 * 60) return 0;
+
+	// Default: use interval in minutes as mod number
+	return Math.floor(intervalMinutes);
+}
+
+/**
+ * Calculate the day of year (1-365/366) for a given date
+ */
+function getYearDay(date: Date): number {
+	const startOfYear = new Date(Date.UTC(date.getUTCFullYear(), 0, 1));
+	const diffTime = date.getTime() - startOfYear.getTime();
+	const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
+	return diffDays + 1; // Day 1 is January 1st
+}
+
+/**
+ * Generate KV key for candle data using the new allocation logic
+ * Key format: {interval_seconds}-{year}-{year_day / mod_number}-{tokenId}
+ * Or: {interval_seconds}-{year}-{tokenId} if modNumber is 0
+ *
+ * @param tokenId - Token ID
+ * @param intervalSeconds - Interval in seconds
+ * @param timestamp - Date/timestamp for the candle
+ * @returns KV key string
+ */
+function generateCandleKVKey(tokenId: string, intervalSeconds: number, timestamp: Date): string {
+	const year = timestamp.getUTCFullYear();
+	const yearDay = getYearDay(timestamp);
+	const modNumber = getModNumber(intervalSeconds);
+
+	if (modNumber === 0) {
+		return `${intervalSeconds}-${year}-${tokenId}`;
+	}
+
+	console.log(yearDay,modNumber)
+	// Calculate: year_day / mod_number (integer division)
+	const modResult = Math.floor(yearDay / modNumber);
+
+	// Generate key: {interval_seconds}-{year}-{modResult}-{tokenId}
+	return `${intervalSeconds}-${year}-${modResult}-${tokenId}`;
+}
+
+/**
  * Handle candle chart data using KV storage
  */
 async function handleCandleChart(request: Request, env: Env): Promise<Response> {
@@ -4449,32 +4502,34 @@ async function handleCandleChart(request: Request, env: Env): Promise<Response> 
 			return new Response('Empty tokenId', { status: 400 });
 		}
 
+		const intervalSeconds = parseInt(timeframe, 10) || 60;
 		const page = parseInt(page_index, 10) || 1;
-		const maxDaysToSearch = 30; // Search up to 30 days back
+		const maxDaysToSearch = 5; // Search up to 30 days back
 
 		// Try to find data starting from the requested page (days back)
 		let candleData: string | null = null;
-		let foundDate: string | null = null;
+
+		// Track which keys we've already tried to avoid duplicates
+		const triedKeys = new Set<string>();
 
 		for (let i = page - 1; i < maxDaysToSearch; i++) {
 			const now = new Date();
 			const targetDate = new Date(now);
 			targetDate.setUTCDate(now.getUTCDate() - i);
 
-			// Format date as YYYY-MM-DD
-			const yyyy = targetDate.getUTCFullYear();
-			const mm = String(targetDate.getUTCMonth() + 1).padStart(2, '0');
-			const dd = String(targetDate.getUTCDate()).padStart(2, '0');
-			const dateStr = `${yyyy}-${mm}-${dd}`;
+			// Generate key using new format: {interval_seconds}-{year}-{modResult}-{tokenId}
+			const key = generateCandleKVKey(tokenId, intervalSeconds, targetDate);
 
-			// Compose the key for this day's candle data: interval-date-tokenID
-			const key = `${timeframe}-${dateStr}-${tokenId}`;
+			// Skip if we've already tried this key
+			if (triedKeys.has(key)) {
+				continue;
+			}
+			triedKeys.add(key);
 
 			// Try to retrieve candle data for this day from KV
 			candleData = await env.KV.get(key, 'text');
 
 			if (candleData) {
-				foundDate = dateStr;
 				break;
 			}
 		}
