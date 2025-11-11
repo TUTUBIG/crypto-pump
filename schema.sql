@@ -70,6 +70,7 @@ CREATE TABLE IF NOT EXISTS tokens (
     icon_url TEXT,
     daily_volume_usd DECIMAL(30,18) DEFAULT 0,
     volume_updated_at TIMESTAMP,
+    is_special BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
