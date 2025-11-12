@@ -312,7 +312,10 @@ async function listTokens(
     page: number = 1,
     pageSize: number = 20,
     chainId?: string,
-    search?: string
+    search?: string,
+    limit?: number,
+    sortBy?: string,
+    sortOrder?: string
 ): Promise<TokenInfo[]> {
     // Build query parts
     let whereClause = '';
@@ -345,17 +348,39 @@ async function listTokens(
 
     const total = Number(countResult?.count) || 0;
 
-    // Get paginated results
-    const offset = (page - 1) * pageSize;
-    bindings.push(pageSize, offset);
+    // Validate and set sortBy - whitelist allowed columns to prevent SQL injection
+    const allowedSortColumns = [
+        'id', 'chain_id', 'token_address', 'token_symbol', 'token_name',
+        'decimals', 'daily_volume_usd', 'volume_updated_at', 'created_at', 'updated_at'
+    ];
+    const validSortBy = sortBy && allowedSortColumns.includes(sortBy.toLowerCase()) 
+        ? sortBy.toLowerCase() 
+        : 'created_at';
+
+    // Validate and set sortOrder - only allow ASC or DESC
+    const validSortOrder = sortOrder && (sortOrder.toUpperCase() === 'ASC' || sortOrder.toUpperCase() === 'DESC')
+        ? sortOrder.toUpperCase()
+        : 'DESC';
+
+    // Use limit if provided, otherwise use pageSize for pagination
+    const effectiveLimit = limit || pageSize;
+    const offset = limit ? 0 : (page - 1) * pageSize; // If limit is used, don't use offset
+
+    bindings.push(effectiveLimit);
+    if (!limit) {
+        bindings.push(offset);
+    }
+
+    const orderByClause = `ORDER BY ${validSortBy} ${validSortOrder}`;
+    const limitClause = limit ? 'LIMIT ?' : 'LIMIT ? OFFSET ?';
 
     const result = await db.prepare(`
         SELECT id, chain_id, token_address, token_symbol, token_name, decimals,
                icon_url, daily_volume_usd, volume_updated_at, created_at, updated_at
         FROM tokens
         ${whereClause}
-        ORDER BY created_at DESC
-        LIMIT ? OFFSET ?
+        ${orderByClause}
+        ${limitClause}
     `).bind(...bindings).all();
 
 	return result.results.map((row: any) => ({
@@ -2345,10 +2370,13 @@ app.get('/tokens', async (c) => {
 	try {
 		const page = parseInt(c.req.query('page') || '1');
 		const pageSize = Math.min(parseInt(c.req.query('pageSize') || '20'), 100);
+		const limit = c.req.query('limit') ? Math.min(parseInt(c.req.query('limit') || '20'), 100) : undefined;
+		const sortBy = c.req.query('sortBy') || undefined;
+		const sortOrder = c.req.query('sortOrder') || undefined;
 		const chainId = c.req.query('chainId') || undefined;
 		const searchKey = c.req.query('search') || undefined;
 
-		const result = await listTokens(c.env.DB, page, pageSize, chainId, searchKey);
+		const result = await listTokens(c.env.DB, page, pageSize, chainId, searchKey, limit, sortBy, sortOrder);
 		return c.json(result);
 	} catch (error) {
 		console.error('Error listing tokens:', error);
