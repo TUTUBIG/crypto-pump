@@ -353,8 +353,8 @@ async function listTokens(
         'id', 'chain_id', 'token_address', 'token_symbol', 'token_name',
         'decimals', 'daily_volume_usd', 'volume_updated_at', 'created_at', 'updated_at'
     ];
-    const validSortBy = sortBy && allowedSortColumns.includes(sortBy.toLowerCase()) 
-        ? sortBy.toLowerCase() 
+    const validSortBy = sortBy && allowedSortColumns.includes(sortBy.toLowerCase())
+        ? sortBy.toLowerCase()
         : 'created_at';
 
     // Validate and set sortOrder - only allow ASC or DESC
@@ -837,10 +837,10 @@ async function updateWatchedToken(
     if (updates.alert_active !== undefined) {
         setParts.push('alert_active = ?');
         values.push(updates.alert_active ? 1 : 0);
-
-        // When alert_active changes, set record_refresh = true to sync with memory
-        setParts.push('record_refresh = 1');
     }
+
+		// When alert_active changes, set record_refresh = true to sync with memory
+		setParts.push('record_refresh = 1');
 
     if (setParts.length === 0) {
         return { success: false, error: 'No updates provided' };
