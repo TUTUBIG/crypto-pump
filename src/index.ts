@@ -120,6 +120,30 @@ interface WatchedTokenWithDetails extends WatchedToken {
 	icon_url?: string;
 }
 
+interface ApiKey {
+	id: number;
+	api_key: string;
+	name?: string;
+	created_at: string;
+	updated_at: string;
+}
+
+interface RegisteredAddress {
+	id: number;
+	api_key_id: number;
+	chain_id: string;
+	address: string;
+	created_at: string;
+}
+
+interface BloomFilter {
+	id: number;
+	chain_id: string;
+	filter_type: 'address' | 'token';
+	filter_data: Uint8Array;
+	updated_at: string;
+}
+
 // Database helper functions
 async function addPool(db: D1Database, poolData: PoolInfo): Promise<{ success: boolean; id: number }> {
 	const result = await db.prepare(`
@@ -538,6 +562,167 @@ async function updateTokenVolume(
         WHERE chain_id = ? AND token_address = ?
     `).bind(volumeUsd, chainId, tokenAddress).run();
     return result.success;
+}
+
+// Simple Bloom Filter implementation
+class SimpleBloomFilter {
+	private bits: Uint8Array;
+	private size: number;
+	private hashCount: number;
+
+	constructor(size: number = 1024 * 8, hashCount: number = 3) {
+		this.size = size;
+		this.hashCount = hashCount;
+		this.bits = new Uint8Array(Math.ceil(size / 8));
+	}
+
+	private hash(str: string, seed: number): number {
+		let hash = seed;
+		for (let i = 0; i < str.length; i++) {
+			hash = ((hash << 5) - hash) + str.charCodeAt(i);
+			hash = hash & hash; // Convert to 32bit integer
+		}
+		return Math.abs(hash) % this.size;
+	}
+
+	add(item: string): void {
+		for (let i = 0; i < this.hashCount; i++) {
+			const hash = this.hash(item, i);
+			const byteIndex = Math.floor(hash / 8);
+			const bitIndex = hash % 8;
+			this.bits[byteIndex] |= (1 << bitIndex);
+		}
+	}
+
+	mightContain(item: string): boolean {
+		for (let i = 0; i < this.hashCount; i++) {
+			const hash = this.hash(item, i);
+			const byteIndex = Math.floor(hash / 8);
+			const bitIndex = hash % 8;
+			if ((this.bits[byteIndex] & (1 << bitIndex)) === 0) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	serialize(): Uint8Array {
+		return this.bits;
+	}
+
+	static deserialize(data: Uint8Array, size: number = 1024 * 8, hashCount: number = 3): SimpleBloomFilter {
+		const filter = new SimpleBloomFilter(size, hashCount);
+		filter.bits = data;
+		return filter;
+	}
+}
+
+// App Token and Address helper functions
+async function getAppToken(db: D1Database, appToken: string): Promise<{ success: boolean; id?: number; error?: string }> {
+	try {
+		// Check if app token exists
+		const existing = await db.prepare(`SELECT id FROM app_tokens WHERE app_token = ?`).bind(appToken).first<{ id: number }>();
+
+		if (existing) {
+			return { success: true, id: existing.id };
+		}
+
+		return { success: false, error: 'Token not found' };
+	} catch (error) {
+		console.error('Error in getAppToken:', error);
+		return { success: false, error: 'Database error' };
+	}
+}
+
+async function countAddressesForAppToken(db: D1Database, appTokenId: number): Promise<number> {
+	const result = await db.prepare(`SELECT COUNT(*) as count FROM registered_addresses WHERE app_token_id = ?`).bind(appTokenId).first<{ count: number }>();
+	return result ? Number(result.count) : 0;
+}
+
+async function registerAddress(
+	db: D1Database,
+	appTokenId: number,
+	chainId: string,
+	address: string
+): Promise<{ success: boolean; id?: number; error?: string }> {
+	try {
+		// Normalize address (lowercase, remove 0x prefix for consistency)
+		const normalizedAddress = address.toLowerCase().replace(/^0x/, '');
+
+		// Check if address already exists for this chain
+		const existing = await db.prepare(`SELECT id FROM registered_addresses WHERE address = ? AND app_token_id = ? AND chain_id = ?`).bind(normalizedAddress,appTokenId,chainId).first<{ id: number }>();
+
+		if (existing) {
+			return { success: false, error: 'Address already registered for this chain' };
+		}
+
+		// Insert new address with bloom_refreshed = 0 (unrefreshed)
+		const result = await db.prepare(`INSERT INTO registered_addresses (app_token_id, chain_id, address, bloom_refreshed) VALUES (?, ?, ?, 0)`).bind(appTokenId, chainId, normalizedAddress).run();
+
+		if (!result.success) {
+			return { success: false, error: 'Failed to register address' };
+		}
+
+		return { success: true, id: Number(result.meta.last_row_id) || 0 };
+	} catch (error) {
+		console.error('Error in registerAddress:', error);
+		return { success: false, error: 'Database error' };
+	}
+}
+
+async function getAllAddressesForChain(db: D1Database, chainId: string): Promise<string[]> {
+	const result = await db.prepare(`
+		SELECT address FROM registered_addresses WHERE chain_id = ?
+	`).bind(chainId).all<{ address: string }>();
+
+	return result.results.map(r => r.address);
+}
+
+async function updateBloomFilter(
+	db: D1Database,
+	chainId: string,
+	filterType: 'address' | 'token',
+	filterData: Uint8Array
+): Promise<{ success: boolean; error?: string }> {
+	try {
+		const result = await db.prepare(`
+			INSERT INTO bloom_filters (chain_id, filter_type, filter_data, updated_at)
+			VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+			ON CONFLICT(chain_id, filter_type) DO UPDATE SET
+				filter_data = excluded.filter_data,
+				updated_at = CURRENT_TIMESTAMP
+		`).bind(chainId, filterType, filterData).run();
+
+		return { success: result.success };
+	} catch (error) {
+		console.error('Error in updateBloomFilter:', error);
+		return { success: false, error: 'Database error' };
+	}
+}
+
+async function getBloomFilter(
+	db: D1Database,
+	chainId: string,
+	filterType: 'address' | 'token'
+): Promise<Uint8Array | null> {
+	try {
+		const result = await db.prepare(`
+			SELECT filter_data FROM bloom_filters WHERE chain_id = ? AND filter_type = ?
+		`).bind(chainId, filterType).first<{ filter_data: Uint8Array }>();
+
+		if (!result) {
+			return null;
+		}
+
+		// Convert ArrayBuffer to Uint8Array if needed
+		if (result.filter_data instanceof ArrayBuffer) {
+			return new Uint8Array(result.filter_data);
+		}
+		return result.filter_data;
+	} catch (error) {
+		console.error('Error in getBloomFilter:', error);
+		return null;
+	}
 }
 
 // Watched Token Validation
@@ -3681,6 +3866,127 @@ app.get('/watched-tokens/active/all', async (c) => {
 	}
 });
 
+// ============== Address Registration Routes ==============
+
+// Register an address
+app.post('/addresses/register', async (c) => {
+	try {
+		// Get app token from header
+		const appToken = c.req.header('X-APP-TOKEN');
+		if (!appToken) {
+			return c.json({ error: 'App token required in X-APP-TOKEN header' }, 401);
+		}
+
+		const body = await c.req.json();
+		const { chain_id, address } = body;
+
+		if (!chain_id || !address) {
+			return c.json({ error: 'chain_id and address are required' }, 400);
+		}
+
+		// Get app token from database
+		const appTokenResult = await getAppToken(c.env.DB, appToken);
+		if (!appTokenResult.success || !appTokenResult.id) {
+			return c.json({ error: appTokenResult.error || 'Failed to process app token' }, 500);
+		}
+
+		// Check address limit (5 per app token)
+		const addressCount = await countAddressesForAppToken(c.env.DB, appTokenResult.id);
+		if (addressCount >= 5) {
+			return c.json({ error: 'Maximum of 5 addresses per app token' }, 400);
+		}
+
+		// Register address (will be marked as unrefreshed for bloom filter)
+		const registerResult = await registerAddress(c.env.DB, appTokenResult.id, chain_id, address);
+		if (!registerResult.success) {
+			return c.json({ error: registerResult.error || 'Failed to register address' }, 400);
+		}
+
+		// Create KV entry for address (empty array for now)
+		const kvKey = `transfer/history/${address.toLowerCase().replace(/^0x/, '')}/${chain_id}`;
+		await c.env.KV.put(kvKey, JSON.stringify([]));
+
+		return c.json({
+			success: true,
+			message: 'Address registered successfully',
+			address_id: registerResult.id
+		}, 201);
+	} catch (error) {
+		console.error('Error registering address:', error);
+		return c.json({ error: 'Failed to register address' }, 500);
+	}
+});
+
+// Get transfer histories for an address
+app.get('/addresses/:address/transfers', async (c) => {
+	try {
+		const address = c.req.param('address');
+		const chainId = c.req.query('chain_id') || '1'; // Default to chain 1
+
+		if (!address) {
+			return c.json({ error: 'Address is required' }, 400);
+		}
+
+		// Normalize address
+		const normalizedAddress = address.toLowerCase().replace(/^0x/, '');
+
+		// Get from KV
+		const kvKey = `transfer/history/${normalizedAddress}/${chainId}`;
+		const kvData = await c.env.KV.get(kvKey);
+
+		if (!kvData) {
+			return c.json({
+				success: true,
+				data: [],
+				count: 0
+			});
+		}
+
+		const transfers = JSON.parse(kvData);
+
+		return c.json({
+			success: true,
+			data: transfers,
+			count: transfers.length
+		});
+	} catch (error) {
+		console.error('Error getting transfer histories:', error);
+		return c.json({ error: 'Failed to get transfer histories' }, 500);
+	}
+});
+
+// Get address bloom filter for a chain (returns stored serialized data)
+app.get('/bloom-filters/addresses/:chainId', async (c) => {
+	try {
+		const chainId = c.req.param('chainId');
+
+		// Get stored serialized bloom filter from database
+		const filterData = await getBloomFilter(c.env.DB, chainId, 'address');
+
+		if (!filterData || filterData.length === 0) {
+			// Return empty bloom filter if none exists
+			const emptyFilter = new SimpleBloomFilter(1024 * 8, 3);
+			return c.json({
+				success: true,
+				chain_id: chainId,
+				filter_type: 'address',
+				filter_data: Array.from(emptyFilter.serialize()),
+			});
+		}
+
+		// Return stored serialized data
+		return c.json({
+			success: true,
+			chain_id: chainId,
+			filter_type: 'address',
+			filter_data: Array.from(filterData),
+		});
+	} catch (error) {
+		console.error('Error getting address bloom filter:', error);
+		return c.json({ error: 'Failed to get bloom filter' }, 500);
+	}
+});
+
 // ============== Webhook Routes ==============
 
 // Webhook: Mark bot as started (called by Telegram bot service)
@@ -4382,6 +4688,11 @@ app.get('/api', async (c) => {
 			'/watched-tokens': 'GET - Get user watchlist (requires auth) | POST - Add token to watchlist (requires auth)',
 			'/watched-tokens/:id': 'GET - Get specific watched token (requires auth) | PUT - Update watched token (requires auth) | DELETE - Remove from watchlist (requires auth)',
 			'/watched-tokens/active/all': 'GET - Get all active watched tokens (for alert system)',
+
+			// Address Registration (requires X-APP-TOKEN header)
+			'/addresses/register': 'POST - Register an address for monitoring (body: {chain_id, address}, max 5 per app token)',
+			'/addresses/:address/transfers': 'GET - Get transfer histories for an address (?chain_id=1)',
+			'/bloom-filters/addresses/:chainId': 'GET - Get address bloom filter for a chain',
 
 			// Webhooks (requires x-telegram-bot-api-secret-token header)
 			'/webhook/bot': 'POST - Link Telegram account and mark bot as started (Telegram message format or {user_id, telegram_id})',

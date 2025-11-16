@@ -150,3 +150,45 @@ CREATE INDEX IF NOT EXISTS idx_pool_created_at ON pool_info(created_at);
 
 -- Create unique constraint for chain_id + pool_address combination
 CREATE UNIQUE INDEX IF NOT EXISTS idx_pool_unique ON pool_info(chain_id, pool_address);
+
+-- Table for APP tokens
+CREATE TABLE IF NOT EXISTS app_tokens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    app_token TEXT NOT NULL UNIQUE,
+    name TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Create index for APP tokens
+CREATE INDEX IF NOT EXISTS idx_app_tokens_key ON app_tokens(app_token);
+
+-- Table for registered addresses
+CREATE TABLE IF NOT EXISTS registered_addresses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    app_token_id INTEGER NOT NULL,
+    chain_id TEXT NOT NULL,
+    address TEXT NOT NULL,
+    bloom_refreshed BOOLEAN DEFAULT false,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (app_token_id) REFERENCES app_tokens(id) ON DELETE CASCADE
+);
+
+-- Create indexes for registered addresses
+CREATE INDEX IF NOT EXISTS idx_registered_addresses_app_token ON registered_addresses(app_token_id);
+CREATE INDEX IF NOT EXISTS idx_registered_addresses_address ON registered_addresses(address);
+CREATE INDEX IF NOT EXISTS idx_registered_addresses_bloom_refreshed ON registered_addresses(bloom_refreshed);
+CREATE INDEX IF NOT EXISTS idx_registered_addresses_chain_bloom ON registered_addresses(chain_id, bloom_refreshed);
+
+-- Table for bloom filters
+CREATE TABLE IF NOT EXISTS bloom_filters (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    chain_id TEXT NOT NULL,
+    filter_type TEXT NOT NULL DEFAULT 'address',
+    filter_data BLOB NOT NULL, -- Serialized bloom filter data
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(chain_id, filter_type)
+);
+
+-- Create index for bloom filters
+CREATE INDEX IF NOT EXISTS idx_bloom_filters_chain ON bloom_filters(chain_id);
